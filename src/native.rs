@@ -373,6 +373,8 @@ extern "system" {
     pub fn DefWindowProcW(hWnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
     pub fn GetMessageW(lpMsg: *mut MSG, hWnd: HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT) -> BOOL;
     pub fn PeekMessageW(lpMsg: *mut MSG, hWnd: HWND, min: UINT, max: UINT, remove: UINT) -> BOOL;
+    pub fn MsgWaitForMultipleObjectsEx(nCount: u32, pHandles: *const isize, dwMilliseconds: u32,
+                                       dwWakeMask: u32, dwFlags: u32) -> u32;
     pub fn TranslateMessage(lpMsg: *const MSG) -> BOOL;
     pub fn DispatchMessageW(lpMsg: *const MSG) -> LRESULT;
     pub fn PostQuitMessage(nExitCode: i32);
@@ -467,6 +469,8 @@ extern "system" {
     pub fn GetLastError() -> DWORD;
     pub fn GetLocalTime(lpSystemTime: *mut SYSTEMTIME);
     pub fn GetTickCount64() -> u64;
+    pub fn QueryPerformanceCounter(v: *mut i64) -> BOOL;
+    pub fn QueryPerformanceFrequency(v: *mut i64) -> BOOL;
     pub fn LoadLibraryW(lpLibFileName: *const u16) -> HMODULE;
     pub fn GetProcAddress(hModule: HMODULE, lpProcName: *const u8) -> *const c_void;
     pub fn FreeLibrary(hModule: HMODULE) -> BOOL;
@@ -751,6 +755,26 @@ pub fn apps_use_dark_theme() -> bool {
 }
 
 // ---- 工具 ----
+/// 高精度计时（微秒级），用于性能实测。
+pub const PM_REMOVE: u32 = 0x0001;
+pub const QS_ALLINPUT: u32 = 0x04FF;
+pub const MWMO_INPUTAVAILABLE: u32 = 0x0004;
+pub const WAIT_TIMEOUT: u32 = 0x0102;
+pub const INFINITE: u32 = 0xFFFF_FFFF;
+pub const WM_QUIT: UINT = 0x0012;
+
+pub fn qpc_now() -> i64 {
+    let mut v: i64 = 0;
+    unsafe { QueryPerformanceCounter(&mut v); }
+    v
+}
+pub fn qpc_ms(delta: i64) -> f64 {
+    let mut f: i64 = 0;
+    unsafe { QueryPerformanceFrequency(&mut f); }
+    if f <= 0 { 0.0 } else { delta as f64 * 1000.0 / f as f64 }
+}
+
+/// 高精度计时（微秒级），用于性能实测。
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }

@@ -34,6 +34,7 @@ fn main() {
     let demo = args.iter().any(|a| a.eq_ignore_ascii_case("--demo"))
         || std::env::var("PROPERDIM_DEMO").map(|v| v == "1").unwrap_or(false);
     let is_reset = args.iter().any(|a| a.to_lowercase().contains("reset"));
+    let bench = args.iter().any(|a| a.eq_ignore_ascii_case("--bench"));
 
     // 对应 App.xaml.cs：卸载器 reset 必须在单实例检查之前，否则主程序运行时会被 Mutex 挡掉
     if is_reset {
@@ -134,6 +135,17 @@ fn main() {
         a.monitors = a.backend.refresh_monitors();
     }
 
+    // 性能实测模式：测完直接退出（结果写到 exe 同目录 bench.txt）
+    if bench {
+        app::show_control_panel();
+        app::bench();
+        // 必须把 gamma 复位，否则测完屏幕会留在暗的状态
+        app::app().backend.shutdown();
+        app::tray_remove(controller);
+        if let Some(f) = app::app().extra.time_end { unsafe { f(1); } }
+        unsafe { ExitProcess(0); }
+    }
+
     // 6. 恢复亮度 / 补偿错过的计划（对应 EvaluateMissedSchedules）
     app::evaluate_missed_schedules(true);
 
@@ -141,13 +153,28 @@ fn main() {
     if app::app().settings.show_on_startup { app::show_control_panel(); }
 
     // 8. 消息循环（对应 WPF Dispatcher）
-    unsafe {
-        let mut msg: MSG = std::mem::zeroed();
-        loop {
-            let r = GetMessageW(&mut msg, NULL, 0, 0);
-            if r == 0 || r == -1 { break; }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+    //
+    // 动画帧由本循环按截止时间驱动，不再用 WM_TIMER：WM_TIMER 是低优先级消息，
+    // 队列里还有其它消息时会被系统合并，实测会让帧间隔变成 16/31ms 交替（肉眼一卡一卡）。
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    let mut last_tick = qpc_now();
+    loop {
+        let wait = if app::anim_active() { 8 } else { INFINITE };
+        unsafe {
+            MsgWaitForMultipleObjectsEx(0, std::ptr::null(), wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+        let mut quit = false;
+        unsafe {
+            while PeekMessageW(&mut msg, NULL, 0, 0, PM_REMOVE) != 0 {
+                if msg.message == WM_QUIT { quit = true; break; }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        if quit || (app::has_app() && app::app().is_shutting_down) { break; }
+        if app::anim_active() && qpc_ms(qpc_now() - last_tick) >= 15.0 {
+            app::anim_tick();
+            last_tick = qpc_now();
         }
     }
 

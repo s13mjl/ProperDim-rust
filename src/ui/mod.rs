@@ -166,9 +166,14 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         }
         WM_LBUTTONUP => {
             let x = lparam_x(lparam); let y = lparam_y(lparam);
+            let had_pressed = ctx.ui.pressed.is_some();
             let ev = ctx.ui.mouse_up(x, y);
             if ctx.ui.capture.is_none() { ReleaseCapture(); }
             if app::app().preview_active { app::stop_preview(); }
+            // 按下态被清掉但没触发 Click（例如移出按钮后松手）也要擦掉高亮
+            if ev == Event::None && had_pressed {
+                InvalidateRect(hwnd, std::ptr::null(), FALSE);
+            }
             dispatch(ctx, ev, hwnd);
             return 0;
         }

@@ -241,11 +241,14 @@ pub struct Widget {
     pub enabled: bool,
     pub visible: bool,
     pub hover: bool,
+    /// 鼠标按在按钮上但还没松开（对应 WPF 的 IsPressed）
+    pub pressed: bool,
     pub tag: String,
 }
 impl Widget {
     pub fn new(id: u32, rect: RECT, kind: Kind) -> Self {
-        Widget { id, rect, kind, enabled: true, visible: true, hover: false, tag: String::new() }
+        Widget { id, rect, kind, enabled: true, visible: true, hover: false,
+            pressed: false, tag: String::new() }
     }
 }
 
@@ -266,6 +269,8 @@ pub struct Ui {
     pub capture: Option<u32>,
     pub hover: Option<u32>,
     pub focus: Option<u32>,
+    /// 已被按下、等待松开才触发 Click 的控件（对应 WPF 按钮在 MouseUp 时触发 Click）
+    pub pressed: Option<u32>,
     pub scroll_offset: i32,
     pub selected_row: Option<usize>,
     /// true = 滑块点击（对应 Slider_ValueChanged 的非拖动分支，需要动画）；false = 拖动中。
@@ -273,7 +278,7 @@ pub struct Ui {
 }
 impl Ui {
     pub fn new() -> Self {
-        Ui { widgets: Vec::new(), capture: None, hover: None, focus: None,
+        Ui { widgets: Vec::new(), capture: None, hover: None, focus: None, pressed: None,
             scroll_offset: 0, selected_row: None, slider_click: false }
     }
     pub fn clear(&mut self) {
@@ -364,6 +369,13 @@ impl Ui {
         let id = self.widgets[i].id;
         let kind = self.widgets[i].kind.clone();
         if focusable(&kind) { self.focus = Some(id); }
+        // 对应 WPF：Button / Hyperlink 在 MouseUp 时才 Click。
+        // 原来按下就触发，导致「点 Cool 时窗口在还没点完就消失」。
+        if matches!(kind, Kind::Button(_) | Kind::RedButton(_) | Kind::CloseButton(_) | Kind::Link(..)) {
+            self.pressed = Some(id);
+            for w in &mut self.widgets { w.pressed = Some(w.id) == self.pressed; }
+            return Event::None;
+        }
         match kind {
             Kind::Slider { min, max, vertical, .. } => {
                 self.capture = Some(id);
@@ -410,10 +422,17 @@ impl Ui {
         }
         Event::None
     }
-    pub fn mouse_up(&mut self, _x: i32, _y: i32) -> Event {
+    pub fn mouse_up(&mut self, x: i32, y: i32) -> Event {
         self.capture = None;
         // 对应 _isDragging = false：松手后滚轮/键盘改值恢复为动画分支
         self.slider_click = false;
+        let pressed = self.pressed.take();
+        for w in &mut self.widgets { w.pressed = false; }
+        if let Some(pid) = pressed {
+            if self.hit(x, y).map(|i| self.widgets[i].id) == Some(pid) {
+                return Event::Click(pid);
+            }
+        }
         Event::None
     }
     pub fn wheel(&mut self, x: i32, y: i32, delta: i32) -> Event {
@@ -490,7 +509,13 @@ fn draw_widget(p: &mut Painter, w: &Widget) {
                 Kind::CloseButton(_) => c::TITLE_BG,
                 _ => c::PANEL,
             };
-            let fill = if w.hover {
+            let fill = if w.pressed {
+                match w.kind {
+                    Kind::RedButton(_) => rgb(0x7A, 0x28, 0x28),
+                    Kind::CloseButton(_) => c::RED_HOVER,
+                    _ => rgb(0x2A, 0x2A, 0x2E),
+                }
+            } else if w.hover {
                 match w.kind {
                     Kind::RedButton(_) => c::RED_HOVER,
                     Kind::CloseButton(_) => c::RED,

@@ -457,11 +457,10 @@ pub fn on_min(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
 // ---------------------------------------------------------------------------
 // AppInfoWindow
 // ---------------------------------------------------------------------------
+/// 只保留两个仓库地址：上游项目 + 本移植版仓库。
 const INFO_URLS: &[&str] = &[
     "https://github.com/crustyoldhuman/ProperDim",
-    "https://www.twitch.tv/crustyoldhuman",
-    "https://www.youtube.com/@crustyoldhuman",
-    "https://github.com/crustyoldhuman/ProperDim",
+    "https://github.com/s13mjl/ProperDim-rust",
 ];
 
 pub fn show_info() {
@@ -474,52 +473,53 @@ pub fn show_info() {
 pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.clear();
     ctx.ui.widgets.push(mk(ID_CLOSE, w - 40, 0, 40, 30, Kind::CloseButton("✕".into())));
-    ctx.ui.widgets.push(mk(1, (w - 65) / 2, 40, 65, 65, Kind::IconBox));
-    let mut name = mk(2, 0, 110, w, 32, Kind::BoldLabel("ProperDim".into(), 24, c::WHITE));
+    // 图标（对应 AppInfoWindow 里 65×65 的 Image）
+    ctx.ui.widgets.push(mk(1, (w - 65) / 2, 80, 65, 65, Kind::IconBox));
+    let mut name = mk(2, 0, 152, w, 32, Kind::BoldLabel("ProperDim".into(), 24, c::WHITE));
     name.tag = "center".into();
     ctx.ui.widgets.push(name);
-    let mut ver = mk(3, 0, 142, w, 18, Kind::Label("Version 1.4.6".into(), 12, c::DIM));
+    let mut ver = mk(3, 0, 186, w, 18, Kind::Label("Version 1.4.6".into(), 12, c::DIM));
     ver.tag = "center".into();
     ctx.ui.widgets.push(ver);
-    let mut gh = mk(ID_INFO_LINK_BASE, 20, 162, w - 40, 18,
-        Kind::Link("https://github.com/crustyoldhuman/ProperDim".into(), c::LINK));
-    gh.tag = "link".into();
-    ctx.ui.widgets.push(gh);
-    let mut created = mk(4, 0, 184, w, 18, Kind::Label("Created on January 15th, 2026".into(), 11, c::PALE));
-    created.tag = "center".into();
-    ctx.ui.widgets.push(created);
-    let mut by = mk(5, 0, 202, w, 18, Kind::Label("By Kevin Stanislawski".into(), 11, c::PALE));
-    by.tag = "center".into();
-    ctx.ui.widgets.push(by);
-    let mut games = mk(6, 0, 224, w, 18,
-        Kind::Label("Like weird games? Check out crustyoldhuman:".into(), 12, c::MUTED));
-    games.tag = "center".into();
-    ctx.ui.widgets.push(games);
-    for (i, label) in ["twitch.tv/crustyoldhuman", "youtube.com/@crustyoldhuman"].iter().enumerate() {
-        let mut l = mk(ID_INFO_LINK_BASE + 1 + i as u32, (w - 190) / 2, 242 + i as i32 * 18, 190, 18,
-            Kind::Link((*label).into(), c::LINK));
+
+    // 仅两个仓库链接：上游 + 本移植版
+    for (i, url) in INFO_URLS.iter().enumerate() {
+        let mut l = mk(ID_INFO_LINK_BASE + i as u32, 20, 232 + i as i32 * 26, w - 40, 20,
+            Kind::Link((*url).into(), c::LINK));
         l.tag = "link".into();
         ctx.ui.widgets.push(l);
     }
-    let mut like = mk(7, 0, 280, w, 18, Kind::Label("If you like ProperDim...".into(), 12, c::MUTED));
-    like.tag = "center".into();
-    ctx.ui.widgets.push(like);
-    let mut coffee = mk(ID_INFO_LINK_BASE + 3, (w - 190) / 2, 298, 190, 18,
-        Kind::Link("...maybe throw me a coffee?".into(), c::LINK));
-    coffee.tag = "link".into();
-    ctx.ui.widgets.push(coffee);
-    ctx.ui.widgets.push(mk(ID_INFO_COOL, (w - 70) / 2, 322, 70, 25, Kind::Button("Cool".into())));
-    // 对应 XAML：HorizontalAlignment="Right" 且 TextDecorations="None"（唯一不带下划线的链接）
+
+    ctx.ui.widgets.push(mk(ID_INFO_COOL, (w - 110) / 2, 300, 110, 26, Kind::Button("Cool".into())));
+    // 对应 XAML：HorizontalAlignment="Right" 且 TextDecorations="None"
     let mut help = mk(ID_INFO_HELP, w - 70, 34, 62, 16, Kind::Link("View help".into(), c::DIM));
     help.tag = "right nounderline".into();
     ctx.ui.widgets.push(help);
     ctx.ui.widgets.push(mk(999, w - 14, 380, 12, 12, Kind::ResizeGrip));
 }
 
+/// 关闭 Info 并「返回」：Info 可能是从 QuickDim / 托盘菜单打开的，
+/// 那时控制面板本来就是隐藏的，直接隐藏 Info 会让人以为整个程序被关掉了。
+fn close_info(hwnd: HWND) {
+    unsafe { ShowWindow(hwnd, SW_HIDE); }
+    app::trigger_save();
+    app::end_modal();
+    let panel_visible = {
+        let a = app::app();
+        a.hwnd_panel != NULL && unsafe { IsWindowVisible(a.hwnd_panel) } != 0
+    };
+    if panel_visible {
+        let h = app::app().hwnd_panel;
+        unsafe { SetForegroundWindow(h); }
+    } else {
+        app::show_control_panel();
+    }
+}
+
 pub fn on_info(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     if let Event::Click(id) = ev {
         match id {
-            ID_CLOSE | ID_INFO_COOL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); app::end_modal(); },
+            ID_CLOSE | ID_INFO_COOL => close_info(hwnd),
             ID_INFO_HELP => {
                 let path = app::readme_path();
                 let s = wide(&path.to_string_lossy());
@@ -533,7 +533,7 @@ pub fn on_info(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                         true, "OK", WarningAction::None);
                 }
             }
-            i if (ID_INFO_LINK_BASE..ID_INFO_LINK_BASE + 4).contains(&i) => {
+            i if (ID_INFO_LINK_BASE..ID_INFO_LINK_BASE + 2).contains(&i) => {
                 app::open_url(INFO_URLS[(i - ID_INFO_LINK_BASE) as usize]);
             }
             _ => {}

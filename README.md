@@ -9,6 +9,7 @@
 > 第四轮：逐段读方法体，补齐数据格式、事件订阅、模态窗口、启动自修复、崩溃恢复、滚轮步进等剩余行为差异。
 > 第五轮：**真正逐行通读上游全部 14 个 `.cs`（5246 行）与 Rust 全部 9 个 `.rs`**，逐语句对照——抓到了前四轮「按方法名/清单抽样」结构性漏掉的一批 bug，包括**亮度动画实际只走第一帧**、**日程列表滚动完全失效**、**AM/PM 单选按钮无效**。
 > 第六轮：修用户实测反馈的四个问题——亮度调节卡顿、滑块圆点锯齿、链接文字偏左、exe 没有图标。
+> 第七轮：**用实测数据定位卡顿真因**（`SetDeviceGammaRamp` 单次阻塞 11ms + `WM_TIMER` 会被合并），改为「gamma 工作线程 + 消息循环驱动动画」；按钮改为松开触发；Info 内容按需求精简。
 
 ## 快速开始
 
@@ -18,6 +19,7 @@ cargo test --offline                     # 17 个单元测试
 target/release/ProperDim.exe             # 正常运行（会真正调节屏幕亮度）
 target/release/ProperDim.exe --demo      # 只演示界面，后端打桩、不改屏幕亮度
 target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步亮度复位
+target/release/ProperDim.exe --bench     # 性能实测，结果写到同目录 bench.txt
 ```
 
 `--demo` 等价环境变量 `PROPERDIM_DEMO=1`。配置文件与 C# 版**共用同一份 `settings.json`**
@@ -154,6 +156,39 @@ target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步�
 | **exe 没有图标** | 从没生成过 Win32 资源；本机没装 Windows SDK 的 `rc.exe` | 新增 `build.rs`：直接手写 `.res`（RT_ICON + RT_GROUP_ICON），用 `cargo:rustc-link-arg` 交给 `link.exe`；图标取上游完整 8 尺寸 ico（去重后 7 个，含 256×256 PNG）。同时窗口补 `WM_SETICON`，Info 窗口的 65px 大图改用资源里的 64px 帧（原来是 16px 放大，糊） |
 
 新增回归测试：`thumb_uses_antialiased_gdiplus`（GDI+ 必须可用）、`icon_resource_embedded`（`LoadImage` + 资源管理器同款 `ExtractIconExW` 都能取到图标）、`repaint_is_cheap_enough_for_60fps`（单帧绘制预算 4ms，防止又退回逐对象创建）。
+
+## 第七轮：卡顿的真因（实测，不再靠猜）
+
+第六轮按「看起来慢的地方」优化了一轮，用户反馈仍卡。于是加了 `--bench` 实测模式，把一次亮度更新拆开计时：
+
+| 环节 | 单次耗时 | 说明 |
+|---|---|---|
+| `apply_brightness`（改值） | **11.1 ms** | 几乎全部是 `SetDeviceGammaRamp` |
+| `apply_brightness`（同值早退） | 0.055 ms | 说明 11ms 全在硬件写入 |
+| `SetDeviceGammaRamp`（<50%，含放大） | 11.1 ms | Magnification 本身可忽略 |
+| 面板整窗重绘 | 1.17 ms | GDI 缓存已生效 |
+| 托盘 ToolTip（NIM_MODIFY） | 0.17 ms | |
+
+**真因有两条**：
+
+1. **`SetDeviceGammaRamp` 单次阻塞约 11ms**（驱动在等垂直同步）。它跑在 UI 线程上，16ms 的帧预算立刻被吃掉，帧间隔只能是 16/31ms 交替。改法：新建一个 `properdim-gamma` 工作线程，UI 线程只把「目标值」投递到合并槽（同设备只保留最新值），**永不阻塞**；退出时 `stop()` 会先等这一批写完，保证亮度被复位。
+2. **`WM_TIMER` 会被系统合并**。它是低优先级消息，队列里还有其它消息时系统只给一拍——即使把间隔设成 16ms、并 `timeBeginPeriod(1)`，实测仍是 16/31 交替。改法：动画改由消息循环按截止时间驱动（`MsgWaitForMultipleObjectsEx` 超时 + 到期调 `anim_tick`），不再用定时器做帧时钟。
+
+同时把动画时间基准从 `GetTickCount64`（~15.6ms 分辨率，相邻两帧会算出同一进度 → 一半的帧是重复值）换成 QPC。
+
+实测对比（400ms 动画，采样每帧亮度变化时刻）：
+
+| | 帧间隔 avg | p50 | p95 | max |
+|---|---|---|---|---|
+| 修复前 | 24.8 ms | 31 | 31 | 31 |
+| 修复后 | **15.6 ms** | **16** | **16** | 31 |
+
+## 第七轮：交互与文案
+
+- **按钮改为「松开」触发**：原来 `Ui::mouse_down` 立刻返回 `Click`，点 Cool/OK 时窗口在鼠标还没松开就消失了，看起来像「窗口被隐藏」而不是「点了按钮」。现在按钮/链接记录按下态（有按下配色），只在**同一控件上松开**才触发；Tab / 复选框 / 滑块 / 预览按钮仍保持按下即生效（与 WPF 行为一致）。
+- **Cool 会「返回」**：Info 可以从 QuickDim/托盘菜单打开，那时控制面板本来就是隐藏的，直接关掉 Info 会让人以为什么都没了。现在关闭 Info 时若面板不可见就 `show_control_panel()`，可见则只把焦点还给面板。
+- **Info 内容精简**（按需求）：去掉 Twitch / YouTube / PayPal / "Created on" / "By ..." / "Like weird games?" 等推广行，只保留两个仓库地址——上游 `crustyoldhuman/ProperDim` 与本移植版 `s13mjl/ProperDim-rust`。`View help` 保留（它是功能入口，不是推广）。
+- 新增 `tools/probe_info_click.py`：真实点击 Info 的 Cool 并打印各窗口可见性，用来验证「返回」行为。
 
 ## 剩余差异（诚实清单）
 

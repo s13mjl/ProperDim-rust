@@ -7,6 +7,8 @@
 use crate::native::*;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct MonitorInfo {
@@ -33,15 +35,156 @@ pub trait Backend {
 }
 
 // ---------------------------------------------------------------------------
+// gamma 工作线程
+//
+// 实测：`SetDeviceGammaRamp` 单次阻塞约 11ms（驱动在等垂直同步），
+// 而亮度动画每帧只有 16ms 预算。把它放在 UI 线程上必然导致帧间隔 16/31ms 抖动。
+// 这里用一个专用线程 + 「只保留最新值」的合并槽：UI 线程只投递，永不阻塞。
+// ---------------------------------------------------------------------------
+#[derive(Default)]
+struct GammaJob {
+    /// (设备名, 目标硬件亮度)
+    batch: Vec<(String, f64)>,
+    force: bool,
+    clear: bool,
+}
+
+struct GammaSink {
+    slot: Arc<(Mutex<Option<GammaJob>>, Condvar)>,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+/// 在 worker 线程上执行一次真实的硬件写入（对应 `HardwareGammaService.ApplyGamma`）。
+fn write_gamma(dcs: &mut HashMap<String, HDC>, applied: &mut HashMap<String, f64>,
+               ramp: &mut RAMP, device: &str, target: f64, force: bool) {
+    let hardware = target.clamp(0.5, 1.0);
+    if !force {
+        if let Some(&last) = applied.get(device) {
+            if (hardware - last).abs() < 0.001 { return; }
+        }
+    }
+    let dc = match dcs.get(device).copied() {
+        Some(d) => d,
+        None => {
+            let name = wide(device);
+            let d = unsafe { CreateDCW(std::ptr::null(), name.as_ptr(), std::ptr::null(), std::ptr::null()) };
+            if d == NULL { return; }
+            dcs.insert(device.to_string(), d);
+            d
+        }
+    };
+    unsafe {
+        if force {
+            let mut cur = RAMP::default();
+            if GetDeviceGammaRamp(dc, &mut cur) != 0 {
+                let expected = (hardware * 65535.0) as u16;
+                if ((cur.red[255] as i32) - (expected as i32)).abs() < 256 {
+                    applied.insert(device.to_string(), hardware);
+                    return;
+                }
+            }
+        }
+        for i in 0..256 {
+            let v = ((i as f64 / 255.0) * hardware * 65535.0) as u16;
+            ramp.red[i] = v; ramp.green[i] = v; ramp.blue[i] = v;
+        }
+        if SetDeviceGammaRamp(dc, ramp) != 0 {
+            applied.insert(device.to_string(), hardware);
+        }
+    }
+}
+
+impl GammaSink {
+    fn new() -> Self {
+        let slot = Arc::new((Mutex::new(None::<GammaJob>), Condvar::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = Arc::clone(&slot);
+        let st2 = Arc::clone(&stop);
+        let join = std::thread::Builder::new()
+            .name("properdim-gamma".into())
+            .spawn(move || {
+                let mut dcs: HashMap<String, HDC> = HashMap::new();
+                let mut applied: HashMap<String, f64> = HashMap::new();
+                let mut ramp = RAMP::default();
+                loop {
+                    let job = {
+                        let (m, cv) = &*s2;
+                        let mut g = m.lock().unwrap();
+                        while g.is_none() && !st2.load(Ordering::Acquire) {
+                            g = cv.wait(g).unwrap();
+                        }
+                        g.take()
+                    };
+                    match job {
+                        Some(j) => {
+                            if j.clear {
+                                for (_, d) in dcs.drain() {
+                                    if d != NULL { unsafe { DeleteDC(d); } }
+                                }
+                                applied.clear();
+                            }
+                            for (dev, v) in j.batch {
+                                write_gamma(&mut dcs, &mut applied, &mut ramp, &dev, v, j.force);
+                            }
+                        }
+                        None => { if st2.load(Ordering::Acquire) { break; } }
+                    }
+                }
+                for (_, d) in dcs.drain() {
+                    if d != NULL { unsafe { DeleteDC(d); } }
+                }
+            })
+            .ok();
+        GammaSink { slot, stop, join }
+    }
+
+    /// 投递一批目标值；若上一批还没被取走，就地合并（同设备只留最新值）。
+    fn submit(&self, batch: Vec<(String, f64)>, force: bool) {
+        if batch.is_empty() && !force { return; }
+        let (m, cv) = &*self.slot;
+        let mut g = m.lock().unwrap();
+        match g.as_mut() {
+            Some(j) => {
+                for (dev, v) in batch {
+                    if let Some(e) = j.batch.iter_mut().find(|(d, _)| *d == dev) { e.1 = v; }
+                    else { j.batch.push((dev, v)); }
+                }
+                j.force |= force;
+            }
+            None => *g = Some(GammaJob { batch, force, clear: false }),
+        }
+        cv.notify_one();
+    }
+
+    /// 显示拓扑变化：让 worker 丢弃旧的 DC。
+    fn clear(&self) {
+        let (m, cv) = &*self.slot;
+        let mut g = m.lock().unwrap();
+        match g.as_mut() {
+            Some(j) => j.clear = true,
+            None => *g = Some(GammaJob { batch: Vec::new(), force: false, clear: true }),
+        }
+        cv.notify_one();
+    }
+
+    /// 停止并等待（会先把待处理的写入做完，保证退出时亮度被复位）。
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let (m, cv) = &*self.slot;
+        { let _g = m.lock().unwrap(); }
+        cv.notify_all();
+        if let Some(j) = self.join.take() { let _ = j.join(); }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 真实 Win32 后端
 // ---------------------------------------------------------------------------
 pub struct Win32Backend {
     targets: HashMap<String, f64>,
-    /// 每个显示器的 GDI DC 缓存。原来每帧 CreateDC/DeleteDC 一次，
-    /// 亮度动画 60fps × 多显示器时是拖动卡顿的另一大来源。
-    dcs: HashMap<String, HDC>,
-    applied: HashMap<String, f64>,
-    ramp: RAMP,
+    /// gamma 硬件写入全部丢给它（UI 线程不再直接调 SetDeviceGammaRamp）
+    sink: GammaSink,
     mag: Magnification,
     mag_ready: bool,
     current_mag_factor: f64,
@@ -61,7 +204,7 @@ impl Win32Backend {
     pub fn new() -> Self {
         let mag = Magnification::load();
         let mut b = Win32Backend {
-            targets: HashMap::new(), dcs: HashMap::new(), applied: HashMap::new(), ramp: RAMP::default(),
+            targets: HashMap::new(), sink: GammaSink::new(),
             mag, mag_ready: false, current_mag_factor: 1.0,
             monitors: Vec::new(), hotkey_hwnd: NULL,
         };
@@ -78,52 +221,6 @@ impl Win32Backend {
             let l = logical.clamp(0.01, 1.0);
             let floor = global_min.clamp(0.0, 1.0);
             floor + ((l - 0.01) / 0.99) * (1.0 - floor)
-        }
-    }
-
-    /// 取（必要时创建并缓存）显示器 DC。
-    fn dc(&mut self, device: &str) -> HDC {
-        if let Some(&d) = self.dcs.get(device) { return d; }
-        let name = wide(device);
-        let d = unsafe { CreateDCW(std::ptr::null(), name.as_ptr(), std::ptr::null(), std::ptr::null()) };
-        if d != NULL { self.dcs.insert(device.to_string(), d); }
-        d
-    }
-
-    fn free_dcs(&mut self) {
-        for (_, d) in self.dcs.drain() {
-            if d != NULL { unsafe { DeleteDC(d); } }
-        }
-    }
-
-    /// 对应 `HardwareGammaService.ApplyGamma()`。
-    fn apply_gamma(&mut self, device: &str, target: f64, force: bool) {
-        let hardware = target.clamp(0.5, 1.0);
-        if !force {
-            if let Some(&last) = self.applied.get(device) {
-                if (hardware - last).abs() < 0.001 { return; }
-            }
-        }
-        let dc = self.dc(device);
-        if dc == NULL { return; }
-        unsafe {
-            if force {
-                let mut cur = RAMP::default();
-                if GetDeviceGammaRamp(dc, &mut cur) != 0 {
-                    let expected = (hardware * 65535.0) as u16;
-                    if ((cur.red[255] as i32) - (expected as i32)).abs() < 256 {
-                        self.applied.insert(device.to_string(), hardware);
-                        return;
-                    }
-                }
-            }
-            for i in 0..256 {
-                let v = ((i as f64 / 255.0) * hardware * 65535.0) as u16;
-                self.ramp.red[i] = v; self.ramp.green[i] = v; self.ramp.blue[i] = v;
-            }
-            if SetDeviceGammaRamp(dc, &self.ramp) != 0 {
-                self.applied.insert(device.to_string(), hardware);
-            }
         }
     }
 
@@ -375,16 +472,18 @@ fn parse_hotkey(s: &str, id: i32) -> Option<(u32, u32)> {
 impl Backend for Win32Backend {
     fn apply_brightness(&mut self, logical: f64, global_min: f64, ignore_minimum: bool) {
         let hardware = Self::to_hardware(logical, global_min, ignore_minimum);
-        let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
-        for n in &names {
-            self.targets.insert(n.clone(), hardware);
-            self.apply_gamma(n, hardware, false);
+        let mut batch = Vec::with_capacity(self.monitors.len());
+        for m in &self.monitors {
+            self.targets.insert(m.device_name.clone(), hardware);
+            batch.push((m.device_name.clone(), hardware));
         }
+        // 只投递，不阻塞 UI 线程
+        self.sink.submit(batch, false);
         self.set_magnification(hardware);
     }
     fn refresh_monitors(&mut self) -> Vec<MonitorInfo> {
-        // 显示拓扑可能已变，缓存的 DC 不能再用
-        self.free_dcs();
+        // 显示拓扑可能已变，让 worker 丢弃旧的 DC
+        self.sink.clear();
         let mut ctx = EnumCtx { out: Vec::new(), cfg: DisplayConfig::query() };
         unsafe {
             EnumDisplayMonitors(NULL, std::ptr::null(), Some(enum_monitor_proc), &mut ctx as *mut _ as LPARAM);
@@ -394,8 +493,9 @@ impl Backend for Win32Backend {
         ctx.out
     }
     fn resync_displays(&mut self) {
-        let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
-        for n in &names { self.apply_gamma(n, 1.0, true); }
+        let batch: Vec<(String, f64)> = self.monitors.iter()
+            .map(|m| (m.device_name.clone(), 1.0)).collect();
+        self.sink.submit(batch, true);
         self.set_magnification(1.0);
         self.monitors.clear();
         self.refresh_monitors();
@@ -413,13 +513,15 @@ impl Backend for Win32Backend {
     }
     fn watchdog_tick(&mut self) {
         let items: Vec<(String, f64)> = self.targets.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        for (k, v) in items { self.apply_gamma(&k, v, true); }
+        self.sink.submit(items, true);
     }
     fn shutdown(&mut self) {
-        let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
-        for n in &names { self.apply_gamma(n, 1.0, true); }
+        let batch: Vec<(String, f64)> = self.monitors.iter()
+            .map(|m| (m.device_name.clone(), 1.0)).collect();
+        self.sink.submit(batch, true);
+        // 等待 worker 把复位写完，避免进程退出时屏幕还留在暗的状态
+        self.sink.stop();
         self.set_magnification(1.0);
-        self.free_dcs();
         unsafe {
             UnregisterHotKey(self.hotkey_hwnd, HOTKEY_ID_UP);
             UnregisterHotKey(self.hotkey_hwnd, HOTKEY_ID_DOWN);
@@ -429,17 +531,17 @@ impl Backend for Win32Backend {
     }
     fn force_reset(&mut self) {
         let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
-        self.free_dcs();
+        let mut ramp = RAMP::default();
         for n in &names {
             unsafe {
-                let dcn = wide(&n);
+                let dcn = wide(n);
                 let dc = CreateDCW(std::ptr::null(), dcn.as_ptr(), std::ptr::null(), std::ptr::null());
                 if dc != NULL {
                     for i in 0..256 {
                         let v = ((i as f64 / 255.0) * 65535.0) as u16;
-                        self.ramp.red[i] = v; self.ramp.green[i] = v; self.ramp.blue[i] = v;
+                        ramp.red[i] = v; ramp.green[i] = v; ramp.blue[i] = v;
                     }
-                    SetDeviceGammaRamp(dc, &self.ramp);
+                    SetDeviceGammaRamp(dc, &ramp);
                     DeleteDC(dc);
                 }
             }
@@ -460,6 +562,10 @@ impl Backend for Win32Backend {
         self.current_mag_factor = 1.0;
     }
     fn is_demo(&self) -> bool { false }
+}
+
+impl Drop for Win32Backend {
+    fn drop(&mut self) { self.sink.stop(); }
 }
 
 // ---------------------------------------------------------------------------

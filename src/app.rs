@@ -77,7 +77,9 @@ pub struct AnimState {
     pub active: bool,
     pub from: f64,
     pub to: f64,
-    pub start: u64,
+    /// 高精度起始时刻（QPC）。用 GetTickCount64 只有 ~15.6ms 分辨率，
+    /// 相邻两帧会算出同一个进度，导致动画一半的帧是「重复值」（肉眼看着一顿一顿）。
+    pub start: i64,
     pub duration_ms: u64,
     pub linear: bool,
     pub ignore_minimum: bool,
@@ -333,10 +335,10 @@ pub fn apply_brightness(logical: f64, animate: bool, ignore_minimum: bool, durat
         };
         from = from.clamp(0.0, 1.0);
         a.anim = AnimState {
-            active: true, from, to: l, start: now_ms(), duration_ms: duration_ms.max(1),
+            active: true, from, to: l, start: qpc_now(), duration_ms: duration_ms.max(1),
             linear, ignore_minimum,
         };
-        unsafe { SetTimer(a.hwnd_controller, TIMER_ANIM, 16, std::ptr::null()); }
+        // 动画由消息循环按截止时间驱动（见 main.rs）；WM_TIMER 会被系统合并，不能当帧时钟
         return;
     }
     // 对应 if (!_isUpdatingFromAnimator) _gammaAnimator.Stop();
@@ -360,11 +362,14 @@ pub fn apply_brightness(logical: f64, animate: bool, ignore_minimum: bool, durat
     }
 }
 
+/// 动画是否在跑（消息循环据此决定等待超时）。
+pub fn anim_active() -> bool { has_app() && app().anim.active }
+
 pub fn anim_tick() {
     let a = app();
     if !a.anim.active { return; }
-    let st = now_ms();
-    let t = ((st - a.anim.start) as f64 / a.anim.duration_ms as f64).min(1.0);
+    let elapsed = qpc_ms(qpc_now() - a.anim.start);
+    let t = (elapsed / a.anim.duration_ms as f64).min(1.0);
     let e = if a.anim.linear { t } else if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 };
     let v = a.anim.from + (a.anim.to - a.anim.from) * e;
     let ignore = a.anim.ignore_minimum;
@@ -376,7 +381,6 @@ pub fn anim_tick() {
     if done {
         let a = app();
         apply_brightness(a.anim.to, false, ignore, 0, false);
-        unsafe { KillTimer(a.hwnd_controller, TIMER_ANIM); }
     }
 }
 
@@ -549,6 +553,115 @@ pub fn evaluate_missed_schedules(animate: bool) {
     }
 }
 
+/// `--bench`：实测「一次亮度更新」各环节的真实耗时，避免继续凭猜优化。
+/// 结果写到 exe 同目录 `bench.txt`。
+pub fn bench() {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let n = 200usize;
+
+    fn time_it<F: FnMut(usize)>(out: &mut String, name: &str, n: usize, mut f: F) {
+        use std::fmt::Write as _;
+        let mut sum = 0.0f64;
+        let mut max = 0.0f64;
+        for i in 0..n {
+            let t = qpc_now();
+            f(i);
+            let ms = qpc_ms(qpc_now() - t);
+            sum += ms;
+            if ms > max { max = ms; }
+        }
+        let _ = writeln!(out, "{:<30} avg {:>7.3}  max {:>7.3}", name, sum / n as f64, max);
+    }
+
+    let _ = writeln!(out, "=== 每次调用耗时（{} 次，单位 ms）===", n);
+
+    // A. 后端：逻辑→硬件 + gamma LUT + Magnification
+    time_it(&mut out, "apply_brightness(后端)", n, |i| {
+        let a = app();
+        let g = a.settings.global_minimum;
+        let v = if i % 2 == 0 { 0.600 } else { 0.605 };
+        a.backend.apply_brightness(v, g, false);
+    });
+    // A2. 同值（走 0.001 早退，不写硬件）→ 与 A 的差值就是 SetDeviceGammaRamp 本身
+    time_it(&mut out, "apply_brightness(同值早退)", n, |_| {
+        let a = app();
+        let g = a.settings.global_minimum;
+        let v = 0.600;
+        a.backend.apply_brightness(v, g, false);
+    });
+    // A3. 低于 50%（会走 MagSetFullscreenColorEffect）
+    time_it(&mut out, "apply_brightness(<50%,含放大)", 50, |i| {
+        let a = app();
+        let g = a.settings.global_minimum;
+        let v = if i % 2 == 0 { 0.400 } else { 0.405 };
+        a.backend.apply_brightness(v, g, false);
+    });
+    // B. 托盘 ToolTip（Shell_NotifyIcon NIM_MODIFY）
+    time_it(&mut out, "tray ToolTip(NIM_MODIFY)", n, |i| {
+        let a = app();
+        tray_tip(a.hwnd_controller, &format!("Brightness: {}%", 60 + (i % 2)));
+    });
+    // C. 面板整窗重绘（Invalidate + UpdateWindow 强制同步 WM_PAINT）
+    let panel = app().hwnd_panel;
+    if panel != NULL {
+        time_it(&mut out, "panel 整窗重绘", n, |_| unsafe {
+            InvalidateRect(panel, std::ptr::null(), TRUE);
+            UpdateWindow(panel);
+        });
+    }
+    // D. 保存防抖定时器
+    time_it(&mut out, "trigger_save(SetTimer)", n, |_| {
+        let a = app();
+        unsafe { SetTimer(a.hwnd_controller, TIMER_SAVE, 1000, std::ptr::null()); }
+    });
+
+    // E. 动画帧间隔：跑一次 400ms 动画，采样亮度变化时刻
+    apply_brightness(0.60, false, false, 0, false);
+    apply_brightness(0.62, true, false, 400, false);
+    let t0 = now_ms();
+    let mut last = -1.0f64;
+    let mut stamps: Vec<u64> = Vec::new();
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    let mut last_tick = qpc_now();
+    while now_ms() - t0 < 700 {
+        unsafe {
+            while PeekMessageW(&mut msg, NULL, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        // 与正式消息循环同样的驱动节拍
+        if anim_active() && qpc_ms(qpc_now() - last_tick) >= 15.0 {
+            anim_tick();
+            last_tick = qpc_now();
+        }
+        let v = app().current_brightness;
+        if (v - last).abs() > 1e-12 {
+            stamps.push(now_ms() - t0);
+            last = v;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let _ = writeln!(out, "
+=== 动画帧（400ms，共 {} 帧）===", stamps.len());
+    let mut deltas: Vec<u64> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
+    if !deltas.is_empty() {
+        let show = deltas.iter().take(40).cloned().collect::<Vec<_>>();
+        deltas.sort_unstable();
+        let avg: f64 = deltas.iter().sum::<u64>() as f64 / deltas.len() as f64;
+        let p50 = deltas[deltas.len() / 2];
+        let p95 = deltas[((deltas.len() as f64) * 0.95) as usize % deltas.len()];
+        let _ = writeln!(out, "帧间隔 ms: avg {:.1}  p50 {}  p95 {}  max {}",
+            avg, p50, p95, deltas[deltas.len() - 1]);
+        let _ = writeln!(out, "前 40 帧: {:?}", show);
+    }
+
+    let path = readme_path().parent().map(|p| p.join("bench.txt"))
+        .unwrap_or_else(|| std::path::PathBuf::from("bench.txt"));
+    let _ = std::fs::write(path, out);
+}
+
 pub fn handle_timer(id: usize) {
     match id {
         TIMER_SCHEDULE => schedule_tick(),
@@ -565,7 +678,7 @@ pub fn handle_timer(id: usize) {
             apply_brightness(v, false, false, 0, false);
         }
         TIMER_WATCHDOG => app().backend.watchdog_tick(),
-        TIMER_ANIM => anim_tick(),
+        // TIMER_ANIM 不再使用：动画由消息循环驱动
         TIMER_SESSION_UNLOCK => {
             let a = app();
             unsafe { KillTimer(a.hwnd_controller, TIMER_SESSION_UNLOCK); }
