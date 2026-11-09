@@ -162,8 +162,32 @@ impl DimSchedule {
         else {
             let pm = h >= 12;
             let hh = match h % 12 { 0 => 12, x => x };
-            format!("{}:{:02} {}", hh, m, if pm { "PM" } else { "AM" })
+            // 对应 C# 的 ToString("h:mm tt")；中文习惯写成「下午1:45」
+            format!("{}{}:{:02}", if pm { "下午" } else { "上午" }, hh, m)
         }
+    }
+
+    /// 列表里显示星期：存储的是 "Mo, Tu, ..." 这类数据键，展示时翻成中文。
+    pub fn display_days(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        for p in self.days.split(|c| c == ',' || c == ' ') {
+            if p.is_empty() { continue; }
+            let zh = match p {
+                "Mo" | "M" | "Monday" => "周一",
+                "Tu" | "T" | "Tuesday" => "周二",
+                "We" | "W" | "Wednesday" => "周三",
+                "Th" | "Thursday" => "周四",
+                "Fr" | "F" | "Friday" => "周五",
+                "Sa" | "S" | "Saturday" => "周六",
+                "Su" | "Sunday" => "周日",
+                other => other,
+            };
+            parts.push(zh);
+        }
+        // 全选 7 天时写「每天」更清楚，也比「周一、周二…」省地方
+        if parts.len() == 7 { return "每天".to_string(); }
+        if parts.is_empty() { return "每天".to_string(); }
+        parts.join("、")
     }
     pub fn display(&self) -> String { format!("{}%", (self.brightness * 100.0).round() as i32) }
     pub fn short_days() -> [&'static str; 7] { ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] }
@@ -361,8 +385,14 @@ mod tests {
         let sc = DimSchedule { time: (13, 45), brightness: 0.25,
             days: "Mo,Tu".into(), last_triggered: "0001-01-01T00:00:00".into() };
         assert_eq!(sc.display_time(true), "13:45");
-        assert_eq!(sc.display_time(false), "1:45 PM");
+        assert_eq!(sc.display_time(false), "下午1:45");
         assert_eq!(sc.display(), "25%");
+        // 数据键 "Mo,Tu" → 中文展示
+        assert_eq!(sc.display_days(), "周一、周二");
+        let all = DimSchedule { days: "Mo, Tu, We, Th, Fr, Sa, Su".into(), ..sc.clone() };
+        assert_eq!(all.display_days(), "每天");
+        let none = DimSchedule { days: String::new(), ..sc.clone() };
+        assert_eq!(none.display_days(), "每天");
     }
     #[test]
     fn reads_original_csharp_json() {

@@ -110,7 +110,7 @@ pub fn create_control_panel(_instance: HINSTANCE) -> HWND {
         && top < (if vh > 0 { vh } else { sh }) as f64 - 50.0;
     let (x, y) = if valid { (left as i32, top as i32) }
         else { (vx + sw / 2 - s(cw) / 2, vy + sh / 2 - s(ch) / 2) };
-    ui::create_window(&cls, "ProperDim Control Panel", x, y, s(cw), s(ch),
+    ui::create_window(&cls, "ProperDim 控制面板", x, y, s(cw), s(ch),
         0, ctx, false)
 }
 
@@ -216,8 +216,8 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
     ctx.ui.widgets.push(mk(ID_CLOSE, w - 34, 0, 32, 30, Kind::CloseButton("✕".into())));
 
     // Tab 行（对应 MainTabs / TabItem Header）
-    let tabs = [("Controls", ID_TAB_CONTROLS), ("Schedule", ID_TAB_SCHEDULE),
-                ("Hotkeys", ID_TAB_HOTKEYS), ("Options", ID_TAB_OPTIONS)];
+    let tabs = [("控制", ID_TAB_CONTROLS), ("日程", ID_TAB_SCHEDULE),
+                ("热键", ID_TAB_HOTKEYS), ("选项", ID_TAB_OPTIONS)];
     let tw = (w - 10) / 4;
     for (i, (label, id)) in tabs.iter().enumerate() {
         ctx.ui.widgets.push(mk(*id, 5 + i as i32 * tw, 31, tw - 2, 24,
@@ -227,9 +227,9 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
     match tab {
         0 => {
             let pct = format!("{}%", (brightness * 100.0).round() as i32);
-            let label_w = 118;
+            let label_w = 50;
             ctx.ui.widgets.push(mk(ID_BRIGHTNESS_TEXT, (w - label_w - 46) / 2, 60, label_w, 20,
-                Kind::Label("Brightness Level: ".into(), 14, c::WHITE)));
+                Kind::Label("亮度：".into(), 14, c::WHITE)));
             ctx.ui.widgets.push(mk(ID_BRIGHTNESS_VALUE, (w - label_w - 46) / 2 + label_w, 60, 46, 20,
                 Kind::Label(pct, 14, c::WHITE)));
             ctx.ui.widgets.push(mk(ID_SLIDER, 20, 82, w - 40, 20,
@@ -242,18 +242,18 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
                     Kind::Button((*label).into())));
             }
             ctx.ui.widgets.push(mk(ID_MIN_LINK, (w - 190) / 2, 136, 190, 18,
-                Kind::Link("Adjust Minimum".into(), c::MUTED)));
+                Kind::Link("调整最低亮度".into(), c::MUTED)));
         }
         1 => {
             let enabled = st.schedule_toggle;
             ctx.ui.widgets.push(mk(ID_SCHEDULE_CHECK, 10, 60, 170, 22,
-                Kind::CheckBox("Enable Schedule".into(), enabled)));
+                Kind::CheckBox("启用日程".into(), enabled)));
             let mut add = mk(ID_ADD_SCHEDULE, w - 34, 60, 24, 24, Kind::Button("+".into()));
             add.enabled = enabled; // ToggleScheduleUI: 未启用时禁止交互
             ctx.ui.widgets.push(add);
             if st.saved_schedules.is_empty() {
                 let mut t = mk(ID_NO_SCHEDULES, 10, 90, w - 20, h - 100,
-                    Kind::Label("No Schedules".into(), 11, c::DIM));
+                    Kind::Label("暂无日程".into(), 11, c::DIM));
                 t.tag = "center".into();
                 t.enabled = enabled;
                 ctx.ui.widgets.push(t);
@@ -276,7 +276,7 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
                     for (sub, text, x, cw) in [
                         (1u32, sc.display_time(st.use_military_time), 32i32, 60i32),
                         (2, sc.display(), 96, 45),
-                        (3, if sc.days.is_empty() { "Every day".into() } else { sc.days.clone() }, 145, w - 150),
+                        (3, sc.display_days(), 145, w - 150),
                     ] {
                         let mut item = mk(base + sub, x, y, cw, 18, Kind::Label(text, 11, c::LIGHT));
                         item.tag = tag.clone(); item.enabled = enabled;
@@ -295,29 +295,29 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
         }
         2 => {
             ctx.ui.widgets.push(mk(ID_HOTKEY_CHECK, 10, 60, 170, 22,
-                Kind::CheckBox("Enable Hotkeys".into(), st.hotkeys_enabled)));
+                Kind::CheckBox("启用热键".into(), st.hotkeys_enabled)));
             ctx.ui.widgets.push(mk(100, 20, 88, 180, 18,
-                Kind::Label("Increase Brightness:".into(), 11, c::WHITE)));
+                Kind::Label("提高亮度：".into(), 11, c::WHITE)));
             ctx.ui.widgets.push(mk(ID_INC_TEXT, w - 140, 86, 130, 22,
                 Kind::TextBox(st.increase_hotkey.clone())));
             if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "hotkey".into(); }
             ctx.ui.widgets.push(mk(101, 20, 116, 180, 18,
-                Kind::Label("Decrease Brightness:".into(), 11, c::WHITE)));
+                Kind::Label("降低亮度：".into(), 11, c::WHITE)));
             ctx.ui.widgets.push(mk(ID_DEC_TEXT, w - 140, 114, 130, 22,
                 Kind::TextBox(st.decrease_hotkey.clone())));
             if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "hotkey".into(); }
             ctx.ui.widgets.push(mk(102, 20, 142, w - 40, 18,
-                Kind::Label("Click a field, then press desired keys".into(), 11, c::MUTED)));
+                Kind::Label("点一下输入框，然后按下想用的组合键".into(), 11, c::MUTED)));
             if !st.hotkeys_enabled {
                 for id in [ID_INC_TEXT, ID_DEC_TEXT] { ctx.ui.set_enabled(id, false); }
             }
         }
         _ => {
             let checks = [
-                (ID_STARTUP_CHECK, "Run ProperDim when Windows starts", auto_start()),
-                (ID_TRAY_CHECK, "Close button minimizes to system tray", st.close_to_tray),
-                (ID_SHOWSTARTUP_CHECK, "Show Controls window on app startup", st.show_on_startup),
-                (ID_SWAP_CHECK, "Swap tray icon left/right click buttons", st.swap_tray_icon_clicks),
+                (ID_STARTUP_CHECK, "开机时自动运行 ProperDim", auto_start()),
+                (ID_TRAY_CHECK, "点关闭按钮时最小化到系统托盘", st.close_to_tray),
+                (ID_SHOWSTARTUP_CHECK, "启动时显示控制面板", st.show_on_startup),
+                (ID_SWAP_CHECK, "交换托盘图标的左右键功能", st.swap_tray_icon_clicks),
             ];
             for (i, (id, label, checked)) in checks.iter().enumerate() {
                 ctx.ui.widgets.push(mk(*id, 34, 60 + i as i32 * 21, w - 40, 20,
@@ -326,11 +326,11 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
             let by = h - 32;
             let bw = 110;
             ctx.ui.widgets.push(mk(ID_CLEAR, (w - bw * 2 - 20) / 2, by, bw, 24,
-                Kind::RedButton("Clear Schedule".into())));
+                Kind::RedButton("清空日程".into())));
             ctx.ui.widgets.push(mk(ID_RESYNC, (w - bw * 2 - 20) / 2 + bw + 10, by, bw, 24,
-                Kind::RedButton("Resync Displays".into())));
+                Kind::RedButton("重置显示器".into())));
             ctx.ui.widgets.push(mk(ID_INFO_LINK, w - 58, h - 54, 50, 16,
-                Kind::Link("Info...".into(), c::DIM)));
+                Kind::Link("关于...".into(), c::DIM)));
         }
     }
     ctx.ui.widgets.push(mk(999, w - 14, h - 14, 12, 12, Kind::ResizeGrip));
@@ -417,11 +417,11 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                     set_tab(id - ID_TAB_CONTROLS, ctx, hwnd),
                 ID_MIN_LINK => dialogs::show_min(),
                 ID_ADD_SCHEDULE => dialogs::show_schedule(None),
-                ID_CLEAR => dialogs::show_warning("Clear Schedule",
-                    "You are about to completely wipe all of your scheduled events. Is this what you truly desire?",
+                ID_CLEAR => dialogs::show_warning("清空日程",
+                    "将清空所有已保存的日程，此操作不可恢复。",
                     false, "", dialogs::WarningAction::ClearSchedule),
-                ID_RESYNC => dialogs::show_warning("Reset Brightness",
-                    "You are about to reset your brightness settings. Your schedule will remain intact. Is this what you truly desire?",
+                ID_RESYNC => dialogs::show_warning("重置亮度",
+                    "将重置亮度设置，已保存的日程不受影响。",
                     false, "", dialogs::WarningAction::Resync),
                 ID_INFO_LINK => dialogs::show_info(),
                 ID_INC_TEXT | ID_DEC_TEXT => { /* 焦点由 Ui 维护；热键录入在 WM_KEYDOWN 中处理 */ }
@@ -565,7 +565,7 @@ pub fn create_tray_menu() -> HWND {
     ctx.bg = c::BG;
     ctx.hide_on_deactivate = true;
     let (w, h) = (s(140), s(240));
-    let h2 = ui::create_window(&cls, "ProperDim Menu", 0, 0, w, h,
+    let h2 = ui::create_window(&cls, "ProperDim 菜单", 0, 0, w, h,
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, ctx, false);
     h2
 }
@@ -574,7 +574,7 @@ pub fn layout_tray_menu(ctx: &mut WindowCtx, w: i32, _h: i32) {
     let v = app::app().current_brightness;
     ctx.ui.clear();
     ctx.ui.widgets.push(mk(ID_MENU_VALUE - 100, 0, 6, w, 22,
-        Kind::BoldLabel("QuickDim".into(), 12, c::WHITE)));
+        Kind::BoldLabel("快速调光".into(), 12, c::WHITE)));
     if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "center".into(); }
     // 用 DT_CENTER 的 Label 由主题绘制；这里保持与 XAML 一致的文本
     ctx.ui.widgets.push(mk(ID_MENU_SLIDER, (w - 60) / 2, 30, 60, 120,
@@ -583,8 +583,8 @@ pub fn layout_tray_menu(ctx: &mut WindowCtx, w: i32, _h: i32) {
         Kind::Label(format!("{}%", (v * 100.0).round() as i32), 14, c::WHITE)));
     if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "center".into(); }
     ctx.ui.widgets.push(mk(310, 8, 178, w - 16, 1, Kind::Separator));
-    ctx.ui.widgets.push(mk(ID_MENU_CONTROLS, 4, 182, w - 8, 26, Kind::Button("Controls".into())));
-    ctx.ui.widgets.push(mk(ID_MENU_EXIT, 4, 210, w - 8, 26, Kind::Button("Exit".into())));
+    ctx.ui.widgets.push(mk(ID_MENU_CONTROLS, 4, 182, w - 8, 26, Kind::Button("控制面板".into())));
+    ctx.ui.widgets.push(mk(ID_MENU_EXIT, 4, 210, w - 8, 26, Kind::Button("退出".into())));
 }
 
 pub fn on_tray_menu(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {

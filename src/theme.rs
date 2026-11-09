@@ -60,7 +60,8 @@ fn cached_font(px: i32, weight: i32) -> HFONT {
         let mut c = c.borrow_mut();
         let key = px * 1000 + weight;
         if let Some(&f) = c.fonts.get(&key) { return f; }
-        let face = wide("Segoe UI");
+        // 汉化版用「微软雅黑 UI」：Segoe UI 没有中文字形，会走字体链接，中文发虚
+        let face = wide("Microsoft YaHei UI");
         let h = unsafe {
             CreateFontW(-px.max(1), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,

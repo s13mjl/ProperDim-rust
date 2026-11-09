@@ -162,7 +162,7 @@ pub fn tray_tip(hwnd: HWND, text: &str) {
 }
 pub fn set_tooltip_brightness() {
     let a = app();
-    tray_tip(a.hwnd_controller, &format!("Brightness: {}%", (a.current_brightness * 100.0).round() as i32));
+    tray_tip(a.hwnd_controller, &format!("亮度：{}%", (a.current_brightness * 100.0).round() as i32));
 }
 
 /// 原生 Win32 弹出菜单（对应 C# 右键菜单中的常规项；QuickDim 滑块另用自绘窗口）。
@@ -173,10 +173,10 @@ pub fn show_native_menu(hwnd: HWND) {
         let m = CreatePopupMenu();
         if m == NULL { return; }
         let items: [(usize, &str); 4] = [
-            (MENU_CONTROLS, "Controls"),
-            (MENU_QUICKDIM, "QuickDim"),
-            (MENU_INFO, "Info..."),
-            (MENU_EXIT, "Exit"),
+            (MENU_CONTROLS, "控制面板"),
+            (MENU_QUICKDIM, "快速调光"),
+            (MENU_INFO, "关于..."),
+            (MENU_EXIT, "退出"),
         ];
         for (i, &(id, label)) in items.iter().enumerate() {
             if i == 3 {
@@ -742,7 +742,7 @@ pub fn open_url(url: &str) {
     let r = unsafe { ShellExecuteW(NULL, op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
     // 对应 Hyperlink_RequestNavigate 的失败提示
     if (r as isize) <= 32 {
-        ui::dialogs::show_warning("Error", &format!("Unable to open link: {}", url),
+        ui::dialogs::show_warning("错误", &format!("无法打开链接：{}", url),
             true, "OK", WarningAction::None);
     }
 }

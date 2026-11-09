@@ -155,8 +155,8 @@ pub fn show_schedule(edit: Option<usize>) {
     }
     let hwnd = &mut app::app().hwnd_schedule as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::ScheduleDialog);
-    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustSchedule", "Event Scheduler", cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::ScheduleDialog, "Event Scheduler", true); c.bg = c::BG; c.resizable = true; c.min_w = s(320); c.min_h = s(280); c.max_w = s(500); c.max_h = s(453); c });
+    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustSchedule", "日程设置", cw, ch,
+        || { let mut c = WindowCtx::new(WindowKind::ScheduleDialog, "日程设置", true); c.bg = c::BG; c.resizable = true; c.min_w = s(320); c.min_h = s(280); c.max_w = s(500); c.max_h = s(453); c });
 }
 
 pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
@@ -165,7 +165,7 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     let editing = app::app().edit_schedule_index.is_some();
     ctx.ui.clear();
     ctx.ui.widgets.push(mk(ID_CLOSE, w - 32, 0, 32, 32, Kind::CloseButton("✕".into())));
-    let mut t = mk(1, 0, 38, w, 18, Kind::Label("Time".into(), 12, c::LIGHT));
+    let mut t = mk(1, 0, 38, w, 18, Kind::Label("时间".into(), 12, c::LIGHT));
     t.tag = "center".into();
     ctx.ui.widgets.push(t);
 
@@ -175,18 +175,18 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     colon.tag = "center".into();
     ctx.ui.widgets.push(colon);
     ctx.ui.widgets.push(mk(ID_SCH_MINUTE, 139, 58, 65, 24, Kind::Combo(format!("{:02}", minute))));
-    ctx.ui.widgets.push(mk(ID_SCH_AM, 210, 58, 42, 24, Kind::Radio("AM".into(), !pm && !is24)));
-    ctx.ui.widgets.push(mk(ID_SCH_PM, 254, 58, 42, 24, Kind::Radio("PM".into(), pm && !is24)));
+    ctx.ui.widgets.push(mk(ID_SCH_AM, 210, 58, 42, 24, Kind::Radio("上午".into(), !pm && !is24)));
+    ctx.ui.widgets.push(mk(ID_SCH_PM, 254, 58, 42, 24, Kind::Radio("下午".into(), pm && !is24)));
     if is24 {
         ctx.ui.set_visible(ID_SCH_AM, false);
         ctx.ui.set_visible(ID_SCH_PM, false);
     }
 
     ctx.ui.widgets.push(mk(ID_SCH_24H, 20, 88, 220, 20,
-        Kind::CheckBox("Use 24-hour clock".into(), is24)));
+        Kind::CheckBox("使用 24 小时制".into(), is24)));
 
     let pct = format!("{}%", (brightness * 100.0).round() as i32);
-    ctx.ui.widgets.push(mk(3, 66, 112, 108, 18, Kind::Label("Brightness: ".into(), 12, c::WHITE)));
+    ctx.ui.widgets.push(mk(3, 66, 112, 108, 18, Kind::Label("亮度：".into(), 12, c::WHITE)));
     ctx.ui.widgets.push(mk(4, 172, 112, 46, 18, Kind::Label(pct, 12, c::WHITE)));
     let mut sld = mk(ID_SCH_SLIDER, 20, 134, 240, 24,
         Kind::Slider { min: unsafe { SCH_MIN }, max: 1.0, value: brightness, vertical: false });
@@ -195,10 +195,10 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.widgets.push(mk(ID_SCH_PREVIEW, 266, 136, 24, 20, Kind::PreviewButton));
     if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "preview".into(); }
 
-    let mut days_label = mk(5, 0, 162, w, 18, Kind::Label("Days Active".into(), 12, c::LIGHT));
+    let mut days_label = mk(5, 0, 162, w, 18, Kind::Label("生效日".into(), 12, c::LIGHT));
     days_label.tag = "center".into();
     ctx.ui.widgets.push(days_label);
-    let labels = ["M", "T", "W", "Th", "F", "S", "Su"];
+    let labels = ["一", "二", "三", "四", "五", "六", "日"];
     for i in 0..7 {
         ctx.ui.widgets.push(mk(ID_SCH_DAY_BASE + i, 10 + i as i32 * 43, 184, 40, 20,
             Kind::DayBox(labels[i as usize].into(), days[i as usize])));
@@ -214,8 +214,8 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
             .filter(|s| !s.is_empty()).collect();
         parts.iter().any(|p| cur_days.contains(p))
     });
-    let label = if conflict { "Timeslot already scheduled".to_string() }
-        else if editing { "Update Event".into() } else { "Add Event".into() };
+    let label = if conflict { "该时段已有日程".to_string() }
+        else if editing { "更新日程".into() } else { "添加日程".into() };
     let bw = if conflict { 200 } else { 130 };
     let mut btn = mk(ID_SCH_ADD, (w - bw) / 2, 218, bw, 25, Kind::Button(label));
     btn.enabled = !conflict;
@@ -323,7 +323,7 @@ fn relayout_hwnd(ctx: &mut WindowCtx, hwnd: HWND) {
 fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     let (time, pm, is24, brightness, days) = unsafe { (SCH_TIME, SCH_PM, SCH_24H, SCH_BRIGHTNESS, SCH_DAYS) };
     if !days.iter().any(|b| *b) {
-        show_warning("Missing Event Information", "You forgot to select the event days!", true, "Oops", WarningAction::None);
+        show_warning("缺少日程信息", "你还没有选择生效的星期！", true, "知道了", WarningAction::None);
         return;
     }
     let mut hour = time.0;
@@ -390,7 +390,7 @@ pub fn show_min() {
     let hwnd = &mut app::app().hwnd_min as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::MinDialog);
     show_or_create(unsafe { &mut *hwnd }, "ProperDimRustMin", "ProperDim", cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::MinDialog, "Adjust Minimum Brightness", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(260); c.max_w = s(450); c.max_h = s(390); c });
+        || { let mut c = WindowCtx::new(WindowKind::MinDialog, "调整最低亮度", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(260); c.max_w = s(450); c.max_h = s(390); c });
 }
 
 pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
@@ -398,11 +398,11 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.clear();
     ctx.ui.widgets.push(mk(ID_CLOSE, w - 45, 0, 45, 30, Kind::CloseButton("✕".into())));
     let mut intro = mk(1, 15, 34, w - 30, 34,
-        Kind::Label("Adjust the slider below to set the absolute minimum brightness.".into(), 11, c::MUTED));
+        Kind::Label("拖动下方滑块，设定屏幕能达到的最低亮度。".into(), 11, c::MUTED));
     intro.tag = "wrap_center".into();
     ctx.ui.widgets.push(intro);
     ctx.ui.widgets.push(mk(2, 40, 76, 150, 20,
-        Kind::Label("Minimum Brightness: ".into(), 14, c::WHITE)));
+        Kind::Label("最低亮度：".into(), 14, c::WHITE)));
     ctx.ui.widgets.push(mk(3, 190, 76, 46, 20,
         Kind::Label(format!("{}%", (v * 100.0).round() as i32), 14, c::WHITE)));
     let mut sld = mk(ID_MIN_SLIDER, 15, 102, 230, 24,
@@ -412,11 +412,11 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.widgets.push(mk(ID_MIN_PREVIEW, 252, 104, 24, 20, Kind::PreviewButton));
     if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "preview".into(); }
     let mut note = mk(4, 15, 132, w - 30, 52,
-        Kind::Label("TIP: Enable hotkeys before saving changes here so you can't accidentally blackout your screen.".into(), 11, c::MUTED));
+        Kind::Label("提示：建议先启用热键，再调整这里。".into(), 11, c::MUTED));
     note.tag = "wrap_center".into();
     ctx.ui.widgets.push(note);
-    ctx.ui.widgets.push(mk(ID_MIN_OK, 40, 198, 100, 25, Kind::Button("Looks good".into())));
-    ctx.ui.widgets.push(mk(ID_MIN_CANCEL, 160, 198, 100, 25, Kind::Button("Never mind".into())));
+    ctx.ui.widgets.push(mk(ID_MIN_OK, 40, 198, 100, 25, Kind::Button("就这样".into())));
+    ctx.ui.widgets.push(mk(ID_MIN_CANCEL, 160, 198, 100, 25, Kind::Button("算了".into())));
     ctx.ui.widgets.push(mk(999, w - 14, 246, 12, 12, Kind::ResizeGrip));
 }
 
@@ -474,8 +474,8 @@ pub fn show_info() {
     if !panel_visible { app::show_control_panel(); }
     let hwnd = &mut app::app().hwnd_info as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::InfoWindow);
-    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustInfo", "ProperDim Info", cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::InfoWindow, "ProperDim Info", true); c.bg = c::INFO_BG; c.resizable = true; c.min_w = s(320); c.min_h = s(394); c.max_w = s(480); c.max_h = s(591); c });
+    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustInfo", "关于 ProperDim", cw, ch,
+        || { let mut c = WindowCtx::new(WindowKind::InfoWindow, "关于 ProperDim", true); c.bg = c::INFO_BG; c.resizable = true; c.min_w = s(320); c.min_h = s(394); c.max_w = s(480); c.max_h = s(591); c });
 }
 
 pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
@@ -486,7 +486,7 @@ pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
     let mut name = mk(2, 0, 152, w, 32, Kind::BoldLabel("ProperDim".into(), 24, c::WHITE));
     name.tag = "center".into();
     ctx.ui.widgets.push(name);
-    let mut ver = mk(3, 0, 186, w, 18, Kind::Label("Version 1.4.6".into(), 12, c::DIM));
+    let mut ver = mk(3, 0, 186, w, 18, Kind::Label("版本 1.4.6".into(), 12, c::DIM));
     ver.tag = "center".into();
     ctx.ui.widgets.push(ver);
 
@@ -498,9 +498,9 @@ pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
         ctx.ui.widgets.push(l);
     }
 
-    ctx.ui.widgets.push(mk(ID_INFO_COOL, (w - 110) / 2, 300, 110, 26, Kind::Button("Cool".into())));
+    ctx.ui.widgets.push(mk(ID_INFO_COOL, (w - 110) / 2, 300, 110, 26, Kind::Button("好的".into())));
     // 对应 XAML：HorizontalAlignment="Right" 且 TextDecorations="None"
-    let mut help = mk(ID_INFO_HELP, w - 70, 34, 62, 16, Kind::Link("View help".into(), c::DIM));
+    let mut help = mk(ID_INFO_HELP, w - 70, 34, 62, 16, Kind::Link("查看帮助".into(), c::DIM));
     help.tag = "right nounderline".into();
     ctx.ui.widgets.push(help);
     ctx.ui.widgets.push(mk(999, w - 14, 380, 12, 12, Kind::ResizeGrip));
@@ -537,7 +537,7 @@ pub fn on_info(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                         std::ptr::null(), SW_SHOWNORMAL)
                 };
                 if (r as isize) <= 32 {
-                    show_warning("Error", &format!("Unable to open help file: {}", path.display()),
+                    show_warning("Error", &format!("无法打开帮助文件：{}", path.display()),
                         true, "OK", WarningAction::None);
                 }
             }
@@ -580,8 +580,8 @@ pub fn layout_warning(ctx: &mut WindowCtx, w: i32, _h: i32) {
     if ok_only {
         ctx.ui.widgets.push(mk(ID_WARN_YES, (w - 75) / 2, 100, 75, 25, Kind::Button(custom)));
     } else {
-        ctx.ui.widgets.push(mk(ID_WARN_YES, 60, 100, 75, 25, Kind::Button("It is".into())));
-        ctx.ui.widgets.push(mk(ID_WARN_NO, 160, 100, 75, 25, Kind::Button("It's not".into())));
+        ctx.ui.widgets.push(mk(ID_WARN_YES, 60, 100, 75, 25, Kind::Button("确定".into())));
+        ctx.ui.widgets.push(mk(ID_WARN_NO, 160, 100, 75, 25, Kind::Button("取消".into())));
     }
     ctx.ui.widgets.push(mk(999, w - 14, 136, 12, 12, Kind::ResizeGrip));
 }

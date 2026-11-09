@@ -8,7 +8,7 @@ import sys
 import time
 from ctypes import wintypes
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -52,6 +52,17 @@ gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
 gdi32.DeleteDC.argtypes = [wintypes.HDC]
 
 WM_LBUTTONDOWN, WM_LBUTTONUP = 0x0201, 0x0202
+
+
+def cjk_font(size):
+    """PIL 默认位图字体不含中文字形，截图标注要用系统雅黑。"""
+    for path in ("C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc",
+                 "C:/Windows/Fonts/simhei.ttf"):
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
 
 def grab(hwnd):
@@ -103,7 +114,7 @@ def main():
         p.terminate()
         return 1
     shots = []
-    tabs = [("Controls", 45), ("Schedule", 130), ("Hotkeys", 215), ("Options", 300)]
+    tabs = [("控制页", 45), ("日程页", 130), ("热键页", 215), ("选项页", 300)]
     for name, _ in tabs:
         pass
     # 依次点击 4 个 Tab（控件中心坐标按 350×200 逻辑布局）
@@ -131,10 +142,10 @@ def main():
     # Options tab -> Clear Schedule (warning)
     click(hwnd, 110, 180)
     time.sleep(0.4)
-    for cls, name in [("ProperDimRustMin", "Adjust Minimum Brightness"),
-                      ("ProperDimRustSchedule", "Event Scheduler"),
-                      ("ProperDimRustInfo", "ProperDim Info"),
-                      ("ProperDimRustWarning", "Warning message")]:
+    for cls, name in [("ProperDimRustMin", "调整最低亮度"),
+                      ("ProperDimRustSchedule", "日程设置"),
+                      ("ProperDimRustInfo", "关于"),
+                      ("ProperDimRustWarning", "确认框")]:
         dh = user32.FindWindowW(cls, None)
         if dh:
             img = grab(dh)
@@ -160,11 +171,11 @@ def main():
         DH = 2 * (dh + label_h) + 3 * pad + 46
         dcanvas = Image.new("RGB", (DW, DH), (247, 247, 245))
         dd = ImageDraw.Draw(dcanvas)
-        dd.text((pad, 14), "ProperDim - Rust / pure Win32 dialogs (1:1 port)", fill=(40, 40, 40))
+        dd.text((pad, 14), "ProperDim · Rust / 纯 Win32 对话框", fill=(40, 40, 40), font=cjk_font(14))
         for i, (name, img) in enumerate(dialog_shots[:4]):
             cx = pad + (i % 2) * (dw + pad)
             cy = 46 + pad + (i // 2) * (dh + label_h + pad)
-            dd.text((cx, cy - 20), name, fill=(90, 90, 90))
+            dd.text((cx, cy - 20), name, fill=(90, 90, 90), font=cjk_font(12))
             dcanvas.paste(img, (cx, cy))
         dout = os.path.join(os.path.dirname(out), "dialogs.png")
         dcanvas.save(dout)
@@ -177,11 +188,11 @@ def main():
     H = rows * (ch + label_h) + (rows + 1) * pad + 46
     canvas = Image.new("RGB", (W, H), (247, 247, 245))
     d = ImageDraw.Draw(canvas)
-    d.text((pad, 14), "ProperDim - Rust / pure Win32 + GDI frontend (1:1 port)", fill=(40, 40, 40))
+    d.text((pad, 14), "ProperDim · Rust / 纯 Win32 + GDI 界面", fill=(40, 40, 40), font=cjk_font(14))
     for i, (name, img) in enumerate(shots):
         cx = pad + (i % cols) * (cw + pad)
         cy = 46 + pad + (i // cols) * (ch + label_h + pad)
-        d.text((cx, cy - 22), name + " tab", fill=(90, 90, 90))
+        d.text((cx, cy - 22), name, fill=(90, 90, 90), font=cjk_font(12))
         canvas.paste(img, (cx, cy))
     canvas.save(out)
     print("SAVED", out, canvas.size)

@@ -1,322 +1,108 @@
- ///,\\\'///,\\\'///,\\\'///,\\\'///,\\\'///,\\\'///,\\\'///,\\\
-      ~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~
+﻿==================================================
+   ProperDim 中文版 · 使用说明
+==================================================
 
-    Warmest welcomes to ProperDim! I hope it helps your screen
- brightness dilemmas just as it has mine. This is the User Guide.
+这是一个 Windows 屏幕调光工具：用软件方式压低屏幕亮度，
+比显示器自带的亮度键能压得更低，适合夜间或暗环境使用。
 
-       ~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~⊹˖˚✧.~
- \\\'///,\\\'///,\\\'///,\\\'///,\\\'///,\\\'///,\\\'///,\\\'///
-	    https://github.com/crustyoldhuman/ProperDim
-
-
-            '///,\\\   System Requirements   ///,\\\'
-              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-You will need:
-— Windows 10 at minimum.
-— 64-bit architecture. You're probably good. 
-— Some hard drive space: 
-	Lite installation needs 7MB
-	Full installation needs 145MB
-— If you're using the Lite installer, ".NET Desktop Runtime 10.0 
-(x64)" is required. If you do not have it, you can download it at 
-this URL:
-https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/
-runtime-desktop-10.0.3-windows-x64-installer
+本项目是 crustyoldhuman/ProperDim（C# / WPF）的 Rust 重写版，
+零第三方依赖、单文件、不需要 .NET 运行时。
 
 
-                '///,\\\   Installation   ///,\\\'
-                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------------------
+   运行要求
+--------------------------------------------------
 
-If you are using the Portable version of ProperDim, you don't 
-need to do the steps below, just run the .EXE inside the .ZIP
-
-1. Ensure you have .NET Desktop Runtime 10.0 (x64) installed on 
-your machine. (Skip this step if using the "Full" installer)
-
-2. Double-click either "ProperDim_v1.4_FullSetup.exe" or 
-"ProperDim_v1.4_LiteSetup.exe" to begin the Installation Guru. 
-
-3. If Windows screams at you with a "SmartScreen" warning, click 
-"More Info" and then "Run Anyway" to make it go away.
-***Note*** To fix this, I would need to pay Microsoft a 
-licensing fee of $400 *~ PER YEAR ~*!!! ($400?! I use a TV for 
-my PC's monitor, for crying out loud!)
-
-4. Return to the installation and follow the on-screen 
-instructions until ProperDim has been acquired. Success!
+- Windows 10 及以上（64 位）
+- 免安装：直接运行 ProperDim.exe 即可
 
 
-            '///,\\\   Control Panel Window   ///,\\\'
-              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------------------
+   快速上手
+--------------------------------------------------
 
-ProperDim has four tabs for interaction, as well as a useful 
-QuickDim widget in the right click menu of the system tray icon.
-
-The tabs look like this at the top of the ProperDim window:
-
- __| Controls |_| Schedule |_| Hotkeys |_____________| Options |__
-
-
-__| Controls |____________________________________________________
-- Home of the main brightness slider. Adjust this to change the 
-brightness level of your displays. 
-- Below that are six "Quick-Set" shortcut buttons for one-click 
-precise adjustments.
-- The "Adjust Minimum" window link at the bottom of the tab page
-opens the Adjust Minimum Brightness window. Here you can dial in 
-your screens perfect black level for your systems minimum value.
-- ProperDim natively supports multiple monitors without any extra
-setup. See the "Tips & Tidbits" section for exceptions and details.
-- ProperDim fully supports keyboard navigation. Tab cycles through 
-interactive elements. Enter or Spacebar activates selected items. 
-When a window tab is selected, pressing the Left/Right arrows 
-cycles between tabs.
-- Every program window can be permanently resized at any time via
-the bottom-right drag corner. 
+- 托盘图标 左键：打开控制面板
+- 托盘图标 右键：弹出「快速调光」滑块
+- 控制面板「控制」页的主滑块调整全局亮度
+- 下面 6 个按钮是常用亮度的快捷设定
+- 「调整最低亮度」用来设定屏幕能达到的最暗值，
+  防止热键不小心把屏幕按成全黑
 
 
-__| Schedule |____________________________________________________
-This is where you add events to change the screen's brightness at 
-a specified time.
-- To add an event, hit the round "+" button on the top-left of the 
-Schedules tab. 
-- Added events are listed in the _| Schedule |_ tab for review.
-- To edit a previously added event, double click on it. 
-- To remove an event, click the red "X" on the left of the event.
-- The events list is sorted from top to bottom, chronologically.
-Upcoming events are sorted to the top. Events that have occurred
-are moved to the bottom. 
-- Valid events must include a time of day, at least 1 weekday 
-checked, and a brightness level set.
-- To use 24-hour clocks in the scheduler, open any event and check 
-the "Use 24-hour clock" checkbox and click Update Event. 
-- The event scheduler will remember the days you selected for your 
-last added event. Hopefully this saves some clicks. 
-- The event scheduler will still work if your computer is asleep
-or turned off. It will trigger the most recent unfired event on 
-system wake or startup. 
+--------------------------------------------------
+   四个页签
+--------------------------------------------------
 
-__| Hotkeys |_____________________________________________________
-This tab allows you to change your default hotkeys settings, which 
-are [ctrl + alt + up] to increase the brightness, and 
-[ctrl + alt + down] to decrease the brightness. You can also 
-completely disable the hotkeys here by unchecking the checkbox.
+[ 控制 ]
+  主亮度滑块 + 6 个快捷按钮 + 最低亮度入口。
 
-__| Options |_____________________________________________________
-This tab contains application settings and management buttons. 
-   [X] "Run ProperDim on system startup" - having this box checked 
-tells the program to open whenever Windows boots up.  
-   [X] "Close window to system tray" - Unchecking this box tells 
-ProperDim to shut down completely when closing the Control Panel 
-window. Leave this box checked if you want to close the window 
-but keep the program open in the system tray. 
-   [X] "Show ProperDim on app startup" - By default, ProperDim 
-displays the Control Panel window when it opens. Disable this 
-checkbox and ProperDim will boot to the system tray without 
-displaying the program window. 
-- The red "Clear Schedule" button will completely erase all saved 
-events in the _| Schedule |_ tab. 
-- The red "Resync Displays" button completely resets the dimming 
-systems for your system. Use this if you ever experience dimming 
-glitches, but those should be very unlikely. 
+[ 日程 ]
+  按「时间 + 星期」自动改变亮度。
+  - 点右上角 "+" 添加；双击已有项编辑；点左侧红叉删除
+  - 列表按「下次触发时间」排序，未来最近的在上
+  - 勾选「使用 24 小时制」可切换时间显示
+  - 关机或休眠期间错过的日程，开机/解锁后会补触发
+  - 同一时间且星期有重合的日程不能重复添加
+
+[ 热键 ]
+  点一下输入框，然后按下想用的组合键即可录制。
+  默认：Ctrl+Alt+↑ 提高亮度，Ctrl+Alt+↓ 降低亮度。
+  取消勾选「启用热键」可完全关闭。
+
+[ 选项 ]
+  - 开机时自动运行 ProperDim
+  - 点关闭按钮时最小化到系统托盘（取消勾选则直接退出）
+  - 启动时显示控制面板（取消勾选则静默启动到托盘）
+  - 交换托盘图标的左右键功能
+  - 「清空日程」「重置显示器」不可撤销，会先弹确认框
+  - 「关于...」查看版本与项目地址
 
 
-         '///,\\\   Tips, Tricks, & Tidbits   ///,\\\'
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------------------
+   小技巧
+--------------------------------------------------
 
-- Sliders and tabs can be changed a variety of ways. Scroll 
-wheel, click-&-drag, or clicking directly on the slider track.
-- When the Controls tab or the QuickDim slider is visible, you 
-can hold the "Ctrl" key while using the scroll wheel to fine-tune 
-your adjustments in 1% increments. Right-clicking on the Control
-Panel slider or the QuickDim slider while using the scroll wheel
-also triggers the 1% step changes. 
-- If you want to back up your schedule and settings, the 
-settings file is all you need to restore all settings. It's 
-located here:
-C:\Users\*YourName*\AppData\Local\ProperDim\settings.json
-(if you are using the portable version, the JSON file is stored 
-next to ProperDim.exe)
-- All of the windows support keyboard navigation with tab and 
-arrow keys for changes. Win+B is also supported on the tray icon.
-- ProperDim uses a "hybrid" method to adjust the apparent 
-brightness of most screens. It uses a combination of gamma 
-adjustment alongside system level color adjustments and a bunch 
-of clever math to give you a wide brightness spectrum with smooth 
-adjustment and deep blacks. This "hybrid" method works on most 
-displays connected via cables like HDMI. Unfortunately, most 
-virtual displays such as ScreenCast or those hooked up via USB 
-are not fully supported, and will only visibly change brightness 
-below 50%. 
-- Why doesn't ProperDim have blue light filter support like other 
-dimming apps? Because I find the built in night light filter in 
-Windows works just fine for my red light needs.
+- 滑块支持三种操作：滚轮、点击轨道、按住拖动
+- 滚轮按 5% 吸附；按住 Ctrl（或在滑块上按住右键）滚轮为 1% 微调
+- 键盘操作：Tab 切换焦点，Enter/空格激活，
+  焦点在页签上时左右方向键切换页签
+- 每个窗口右下角都能拖动改变大小，尺寸与位置会被记住
+- 托盘图标上按 Win+B 也可以唤起（Windows 默认快捷键）
+
+- 配置文件位置：
+      %LOCALAPPDATA%\ProperDim\settings.json
+  如果 exe 所在目录可写，则改为存放在 exe 旁边的 settings.json。
+  备份这一个文件就能还原全部设置。
 
 
-           '///,\\\   Development Notes   ///,\\\'
-             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------------------
+   已知限制
+--------------------------------------------------
 
-ProperDim was created as a WPF .NET 10.0 application in 
-Microsoft Visual Studio 2026. It was made over a 75-day period 
-using Google Gemini to write the code. The program itself is 
-quite small with just 1,855 lines of executable code consuming 
-about 30mb of system memory when running. Inspiration for 
-ProperDim came from a lifetime of yearning for a simple screen 
-dimming utility that did what I wanted it to, as I've made a 
-habit out of running a PC on regular HDTVs. My computer skills 
-are mostly in media creation, not full-on coding. It took a lot 
-of breaking, a lot of learning, a lot of thinking, and a ton of 
-cussing Google Gemini out to complete this. Good times!
+- 通过 USB / 投屏 / 采集卡接入的虚拟显示器，
+  亮度只会在 50% 以下才有明显变化（这是调光方式本身的限制）
+- 开启 HDR 的屏幕，实际观感取决于显卡驱动的 gamma 行为
 
 
-           '///,\\\    Version History    ///,\\\'
-             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------------------
+   卸载 / 复位
+--------------------------------------------------
 
-ProperDim 1.0:  Proof of concept. I had never made a program 
-		before, so this was a basic version that was 
-		essentially nothing but a brightness slider in 
-		a small window. It worked. 
+直接删除 exe 即可（绿色版，不写注册表，除了可选的「开机自启」项）。
 
-ProperDim 1.1:  I started to make the program more "what I 
-		wanted" it to be. The Quick-Set buttons were 
-		added. The main slider was made more user-
-		friendly, and the fancy hybrid brightness
-		method was implemented to achieve the deep darks 
-		that I wanted. The hotkey tab was added. The 
-		styling was changed to a dark theme somewhere 
-		between modern and classic. I was having a lot 
-		of fun with this. 
+如果卸载或异常退出后屏幕仍停在被调暗的状态，
+运行一次：
 
-ProperDim 1.2:  The scheduler feature was implemented, and was 
-		a huge update for me. It involved a new window, 
-		multiple new variables, new sliders, etc.—all 
-		within the small window size I wanted. A right-
-		click menu was also added to the system tray 
-		icon, as well as a "QuickDim" slider option in 
-		the right-click menu for easy adjustment. After 
-		various other bug fixes and style updates, 1.2 
-		was was the first "complete" version. 
+      ProperDim.exe --reset
 
-ProperDim 1.3:  After passing ProperDim 1.2 around to some 
-		friends, I got a request for multi-display 
-		support. This made sense to me as something 
-		ProperDim needed to be whole. It required new 
-		logic, settings, a new window, monitor 
-		detection, and styling. Every feature was 
-		re-evaluated and optimized. I had learned some 
-		things, and made efforts to ensure the app was 
-		efficient and small. An "App Info" window was 
-		also introduced with brief program information 
-		and some URLs. I used Google Gemini to make the 
-		base images for the icon for ProperDim, and 
-		additional photoshopping to make what I wanted. 
-		The first draft of this text document was added.
-
-		Another addition in 1.3 was an upgrade to the 
-		installation method. Previously, I had used the 
-		default publisher in Visual Studio, which 
-		produced a simple (and very crappy) installer 
-		that sucked in a ton of ways. I replaced this 
-		with an all new, fully customized installer 
-		built from the Inno Setup Compiler program. This
-		is a much better introduction to ProperDim. 
-
-ProperDim 1.4:  ProperDim was now feature complete, but it was 
-		riddled with minor things that weren't "quite 
-		right" after all my previous updates and 
-		additions. For this version, I essentially 
-		combed over the entire app and made sure every 
-		single thing worked and looked exactly how it 
-		should. The UI was cleaned up and perfected, 
-		aiming for intuitive simplicity. The back-end 
-		logic was essentially entirely reorganized. The
- 		system tray icon logic was completely replaced, 
-		and the styling was re-assessed (twice) to ensure 
-		responsiveness and a clean modern look. The 
-		user-friendly features that no one thinks about 
-		(like how exactly the previews should work in the 
-		scheduler window, or how the QuickDim slider is 
-		esented in the system tray menu) were all re-
-		examined to ensure everything felt natural and 
-		consistent across the app. Keyboard navigation 
-		was fully implemented. The 24-hour clock setting 
-		was fleshed out, now making program-wide 
-		conversions for the events when checked. Edge-case 
-		bugs were hunted down and squashed. A ton of them. 
-
-		The biggest front facing change in this version 
-		was the complete removal of the Multi-Display 
-		settings I worked so hard getting to work right. 
-		I upgraded the actual dimming method itself and 
-		replaced the "black overlay" method with a 
-		cleaner, system-level method that dims those pesky 
-		Windows elements like User Account Control popups 
-		as well. This upgrade was not compatible with 
-		individual control of monitors, so I made the hard 
-		choice of cutting the whole feature. I then added 
-		the Minimum Brightness Adjustment setting, because 
-		this was the only way I could ensure every user 
-		could get the deep blacks I wanted to give them 
-		for their specific screens. And that's it. 
-		Everything is implemented and perfect. 
-
-		ProperDim is finished. I hope it works for you!
-
-Version 1.4.5:  Some quality-of-life additions have been added.
-		Every window now has a scalable corner to resize.
-		Also, "State Recovery" has been added. Now, if
-		your PC is asleep or shut off, when it resumes
-		your brightness settings will be recovered as if
-		nothing happened! You can utilize this to auto-
-		matically reset your brightness to 100% before you
-		turn your PC on in the morning. I also cleaned up
-		up the text rendering on windows 10 machines and
-		some stability/performance improvements.
+会把所有显示器的 gamma 与放大色效复位到 100%。
 
 
-	   '///,\\\   Licensing & Support   ///,\\\'
-             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--------------------------------------------------
+   许可与致谢
+--------------------------------------------------
 
-- ProperDim is licensed under the GNU GENERAL PUBLIC LICENSE  
-Version 3  making it completely free and open source
+GPL-3.0。原作者 Kevin Stanislawski（crustyoldhuman）。
 
-- If you have an issue with ProperDim you can use the Github link
-provided below to create an issue or start a topic in the 
-discussions area. 
-
-         https://github.com/crustyoldhuman/ProperDim 
-
-
-	     '///,\\\   Shameless Plugs   ///,\\\'
-               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Game streaming: I be streaming weird indie games and picking apart
-old retro stuff and just fartin' around. I do all my stream assets
-myself so lots of fun custom fun stuff I built from the ground up.
-
-              https://www.twitch.tv/crustyoldhuman
-             https://www.youtube.com/@crustyoldhuman
-
-
-SSVidPlayer: A lightweight, zero-dependency HTML5 video player 
-for PC designed to apply native browser AI video upscaling (like
-NVIDIA RTX Video Super Resolution or AMD RSR) to your local media
-files, all while remaining entirely local and privacy-respecting.
-
-          https://github.com/crustyoldhuman/SSVidPlayer
-
-
-SkyPeek: Coming soon. A fully featured, minimal, efficient, and 
-beautiful weather app that lives right in your PCs system tray by
-the clock. If you're looking for a one-stop shop for radar, per-
-city granular alerts, Windows theme integration, 10-day forecast,
-24-hour forecast, Daily summary with air quality ratings, plenty
-of other bells & whistles, all with no registration, signs up, or
-API keys required anywhere--keep an eye out!
-
-	     https://github.com/crustyoldhuman/SkyPeek
-
-
-<3
-~crustyoldhuman
+上游项目：https://github.com/crustyoldhuman/ProperDim
+本移植版：https://github.com/s13mjl/ProperDim-rust

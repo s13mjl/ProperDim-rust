@@ -3,6 +3,9 @@
 把 [ProperDim](https://github.com/crustyoldhuman/ProperDim)（C# / WPF 的屏幕调光工具）用 **Rust + 纯 Win32 / GDI** 重写了一遍：
 零第三方 crate、单个 exe、常驻内存约 15 MB，不需要 .NET 运行时。
 
+> **当前分支 `zh-CN` 是中文界面版**：界面文案与随程序分发的使用说明全部中文化，字体换成「微软雅黑 UI」。
+> Release 里两个 exe 同源不同语言 —— `ProperDim.exe` 为英文版（`master` 分支构建），`ProperDim-zh-CN.exe` 为本分支构建。
+
 ![控制面板](preview/frontend.png)
 
 ## 功能
@@ -17,9 +20,15 @@
 
 ## 下载
 
-到 [Releases](https://github.com/s13mjl/ProperDim-rust/releases) 下载 `ProperDim.exe`，双击就能用：
+到 [Releases](https://github.com/s13mjl/ProperDim-rust/releases) 下载后双击就能用，两个版本功能完全一致，只是界面语言不同：
 
-- 免安装，不用 .NET 运行时，单个文件约 825 KB
+| 文件 | 界面 | 由哪个分支构建 |
+|---|---|---|
+| `ProperDim.exe` | 英文 | `master` |
+| `ProperDim-zh-CN.exe` | 简体中文 | `zh-CN` |
+
+
+- 免安装，不用 .NET 运行时，单个文件约 850 KB
 - 需要 Windows 10 及以上（x64）
 - 卸载时复位亮度用 `ProperDim.exe --reset`（对应上游 Inno Setup 的卸载钩子）
 
