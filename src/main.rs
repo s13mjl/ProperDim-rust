@@ -26,6 +26,8 @@ fn main() {
         let name = format!("Crash_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.txt",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         let _ = std::fs::write(dir.join(name), format!("{}", info));
+        // 对应 App.xaml.cs 的 UnhandledException -> LogCrash + EmergencyReset
+        if app::has_app() { app::app().backend.shutdown(); }
     }));
 
     let args: Vec<String> = std::env::args().collect();
@@ -74,7 +76,7 @@ fn main() {
             edit_schedule_index: None, warning_action: WarningAction::None,
             warning_result: None,             anim: AnimState::default(),
             monitors: Vec::new(), tray_added: false,
-            extra: extra_apis, hook: NULL, wts_registered: false,
+            extra: extra_apis, hook: NULL, wts_registered: false, modal_depth: 0,
         };
         app_stub.current_brightness = app_stub.settings.last_opacity;
         app::init(app_stub);
@@ -100,6 +102,12 @@ fn main() {
         let a = app::app();
         a.hwnd_controller = controller;
         a.scale = scale;
+    }
+
+    // 对应 ControlPanel.Window_Loaded 的 SELF-REPAIR：确保注册表自启动项指向当前 exe
+    if !app::app().extra.is_msix() {
+        let en = ui::panels::auto_start();
+        ui::panels::set_auto_start(en);
     }
 
     // 5. 托盘、定时器、热键、显示器、会话通知（对应 MainWindow 构造函数 + SystemEvents）

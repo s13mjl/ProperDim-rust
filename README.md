@@ -6,6 +6,7 @@
 > 第一轮：前端 6 个窗口 + 后端主流程。
 > 第二轮：差异 2/3/6/7/8/9 与 `NativeMethods.cs` 暴露的后端缺口。
 > 第三轮：按上游 **198 个方法 / 64 个 XAML 事件绑定** 逐项核对，补齐交互逻辑与文案，并修正前两轮 README 中过满的「已 1:1」表述。
+> 第四轮：逐段读方法体，补齐数据格式、事件订阅、模态窗口、启动自修复、崩溃恢复、滚轮步进等剩余行为差异。
 
 ## 快速开始
 
@@ -77,17 +78,39 @@ target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步�
 
 同时纠正两处此前的错误结论：`GlobalBrightnessChanged` 在上游**只订阅 ControlPanel / TrayMenuWindow**（ScheduleDialog / MinDialog 本就不联动，不是缺口）；`UpdateDimmerOpacity` 是 `ApplyBrightnessAnimated` 的包装，不是「滑块透明度随亮度变化」。
 
+## 第四轮：按方法体逐段核对后的补齐
+
+| 上游逻辑 | 本轮实现 |
+|---|---|
+| `Add_Click` | 新建计划 `LastTriggered = DateTime.Now`（之前误用 MinValue）、`Days` 用 `", "` 连接（之前无空格）、保存 `UseMilitaryTime` |
+| `ValidateTime` | 冲突条件补上**星期集合交集**判断（之前只比时间）；按钮原文改为 `Add Event` / `Update Event` / `Timeslot already scheduled` |
+| `SetDayCheckboxes` | 兼容 `Mo` / `M` / `Monday` 等别名，按 `,` 与空格分割 |
+| `Is24hCheck_Changed` | 切回 12 小时制时同步 AM/PM（之前会把 20:00 显示成 08 AM），并隐藏 AM/PM 控件 |
+| `ScheduleEvaluated` / `ScheduleTriggered` | 两个事件在上游都订阅 `RefreshList`：10 秒评估无条件重排、触发后重排（之前只重绘不排序） |
+| `ControlPanel_IsVisibleChanged` | 面板隐藏时销毁所有子窗口（之前子窗口会残留） |
+| `ShowDialog()` | 4 个对话框改为模态：禁用主窗口 + 嵌套深度计数，关闭时恢复 |
+| `OnActivated` / `Window_Loaded` | 显示时重排列表；位置合法性校验（`VirtualScreen - 50`）、350:200 宽高比、宽度上限 525 |
+| `Window_Loaded` SELF-REPAIR | 启动时把注册表自启动项重写为当前 exe 路径，清除旧版本残留 |
+| `UnhandledException` | panic hook 增加 `EmergencyReset`：恢复 gamma / Magnification（之前只写日志，崩溃后屏幕可能保持暗） |
+| `Slider_ValueChanged` / `MouseWheel` | 滑块点击（非拖动）走 200ms 动画；滚轮 ±5%，Ctrl/右键 ±1%，小范围滑块 ±1%；空白处也能滚动列表 |
+| `TrayMenuWindow.OnGlobalBrightnessChanged` | 300ms 用户交互防抖；隐藏时补 `lastTrayMenuCloseTime` / ToolTip 恢复 / 溢出窗口关闭 |
+| `HotkeysTab_MouseDown` | 点击空白处取消 TextBox 焦点 |
+| `ResetBrightness_Click` | 确认后强制把主滑块同步到 100% |
+
+同时新增两个只读审计工具：`tools/dump_methods.py`（按方法名抽取上游方法体）与 `tools/audit_literals.py`（字面量/常量比对），便于后续继续核对。
+
 ## 剩余差异（诚实清单）
 
 1. **托盘右键仍是原生弹出菜单**（你指定的技术选型）：上游右键直接弹自定义 QuickDim 滑块窗口。把 `handle_tray_msg` 的右键分支改成 `toggle_tray_menu()` 即可 1:1。
-2. **WPF 特有的 GPU 观感机制无法逐行对应**：`DropShadowEffect`（像素着色器）、`VisualBrush` + `OpacityMask`（逐像素 alpha 裁剪）、`AllowsTransparency` 分层窗口。圆角形状已用 `SetWindowRgn` 等价实现，阴影未复刻；点击/功能不受影响。
+2. **WPF 特有的 GPU 观感机制无法逐行对应**：`DropShadowEffect`（像素着色器）、`VisualBrush` + `OpacityMask`（逐像素 alpha 裁剪）、`AllowsTransparency` 分层窗口、`ApplyThemeShadow` / `PrepareWindowForOS` / `ApplyWindows10Shadow`。圆角形状已用 `SetWindowRgn` 等价实现，阴影未复刻；点击/功能不受影响。
 3. **动画帧同步**：`CompositionTarget.Rendering` → 16ms `SetTimer`，仅顺滑度差异。
-4. **滚动条为近似实现**：用自绘 Slider 样式代替上游的完整 `ScrollBar` ControlTemplate，缺少 `UpdateScheduleScrollFromMouse` 的精确拖动惯性/偏移回调。
-5. **焦点与激活细节**：`HotkeysTab_MouseDown` / `IsClickOnTextBox` / `OnActivated` / `Window_Deactivated` 的部分语义未逐条复刻（主干的失焦隐藏、焦点控件、键盘导航已做）。
-6. **ResizeThumb 宽高比**：上游拖动时按 320/290 比例缩放，本版用系统 `HTBOTTOMRIGHT` 自由调整。
-7. **框架特有**：`DispatcherUnhandledException` 的 `COMException` 错误码白名单（DWM 崩溃恢复）、`InvalidOperationException("UpdateToolTip")` 抑制，Rust 无对应概念。
-8. **未移植的死代码/无等价物**：`SetCursorPos`（上游未调用）、`MonitorsChanged`（无订阅者）、`FriendlyName`/`IsHdrEnabled`/`GammaSupported`（上游只赋值不读取，但已按 1:1 补齐计算）、MSIX `StartupTask`（WinRT API）。
-9. 原 `README.md` 里面向 AI 爬虫的诱导性 HTML 注释未移植（有意）。
+4. **滚动条为近似实现**：用自绘 Slider 样式代替上游的完整 `ScrollBar` ControlTemplate，缺少 `ScrollViewerBehavior` 的平滑滚动动画与 `UpdateScheduleScrollFromMouse` 的精确拖动换算。
+5. **QuickDim 定位**：上游用 DIP + `GetDpiForMonitor` 换算工作区边界；本版全程用物理像素（PerMonitorV2 下 `GetMonitorInfo` 返回的就是物理值），结果等价但实现路径不同，且未复刻 28px 阴影边距。
+6. **焦点与激活细节**：`OnActivated` / `Window_Deactivated` 的部分语义、`Dispatcher.BeginInvoke` 异步更新改为同步（单线程消息循环下等价）。
+7. **ResizeThumb 宽高比**：上游拖动时按 320/290 比例缩放，本版用系统 `HTBOTTOMRIGHT` 自由调整。
+8. **框架特有**：`DispatcherUnhandledException` 的 `COMException` 错误码白名单、`InvalidOperationException("UpdateToolTip")` 抑制、`NativeLogs.txt`（isNative 分支）、`App.OnStartup` 的 try/catch MessageBox，Rust 无对应概念。
+9. **未移植的死代码/无等价物**：`SetCursorPos`（上游未调用）、`MonitorsChanged`（无订阅者）、`FriendlyName`/`IsHdrEnabled`/`GammaSupported`（上游只赋值不读取，但已按 1:1 补齐计算）、MSIX `StartupTask`（WinRT API）、`Window_Loaded` 里空实现的 `TrayMenuWindow`。
+10. 原 `README.md` 里面向 AI 爬虫的诱导性 HTML 注释未移植（有意）。
 
 ## 验证
 

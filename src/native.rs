@@ -133,6 +133,10 @@ pub const IDCANCEL: i32 = 2;
 
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
+pub const SM_XVIRTUALSCREEN: i32 = 76;
+pub const SM_YVIRTUALSCREEN: i32 = 77;
+pub const SM_CXVIRTUALSCREEN: i32 = 78;
+pub const SM_CYVIRTUALSCREEN: i32 = 79;
 pub const SM_CYCAPTION: i32 = 4;
 pub const MONITORINFOF_PRIMARY: u32 = 0x00000001;
 pub const MONITOR_DEFAULTTONEAREST: u32 = 0x00000002;
@@ -376,6 +380,7 @@ extern "system" {
     pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
     pub fn GetAsyncKeyState(vKey: i32) -> i16;
     pub fn SetForegroundWindow(hWnd: HWND) -> BOOL;
+    pub fn EnableWindow(hWnd: HWND, enable: BOOL) -> BOOL;
     pub fn SetFocus(hWnd: HWND) -> HWND;
     pub fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: BOOL) -> BOOL;
     pub fn UpdateWindow(hWnd: HWND) -> BOOL;

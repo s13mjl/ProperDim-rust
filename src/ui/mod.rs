@@ -186,6 +186,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             ScreenToClient(hwnd, &mut pt);
             let delta = ((wparam >> 16) & 0xFFFF) as u16 as i16 as i32;
             let ev = ctx.ui.wheel(pt.x, pt.y, delta);
+            // 列表/Tab 空白区域也要能滚动（对应 ScheduleList_PreviewMouseWheel / TabsArea_MouseWheel）
+            let ev = if ev == Event::None { Event::Wheel(0, delta) } else { ev };
             dispatch(ctx, ev, hwnd);
             return 0;
         }
@@ -193,6 +195,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             let vk = wparam as i32;
             if msg == WM_KEYDOWN && vk == VK_ESCAPE && ctx.kind != WindowKind::Controller {
                 ShowWindow(hwnd, SW_HIDE);
+                if matches!(ctx.kind, WindowKind::ScheduleDialog | WindowKind::MinDialog
+                    | WindowKind::InfoWindow | WindowKind::Warning) { app::end_modal(); }
                 return 0;
             }
             // 对应 HotkeyTextBox_PreviewKeyDown：录制组合键
@@ -314,7 +318,11 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         }
         WM_CLOSE => {
             if ctx.kind == WindowKind::ControlPanel { app::hide_control_panel(true); }
-            else { ShowWindow(hwnd, SW_HIDE); }
+            else {
+                ShowWindow(hwnd, SW_HIDE);
+                if matches!(ctx.kind, WindowKind::ScheduleDialog | WindowKind::MinDialog
+                    | WindowKind::InfoWindow | WindowKind::Warning) { app::end_modal(); }
+            }
             return 0;
         }
         WM_NCDESTROY => {

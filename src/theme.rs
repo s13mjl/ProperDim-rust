@@ -214,15 +214,17 @@ pub struct Ui {
     pub focus: Option<u32>,
     pub scroll_offset: i32,
     pub selected_row: Option<usize>,
+    /// true = 滑块点击（对应 Slider_ValueChanged 的非拖动分支，需要动画）；false = 拖动中。
+    pub slider_click: bool,
 }
 impl Ui {
     pub fn new() -> Self {
         Ui { widgets: Vec::new(), capture: None, hover: None, focus: None,
-            scroll_offset: 0, selected_row: None }
+            scroll_offset: 0, selected_row: None, slider_click: false }
     }
     pub fn clear(&mut self) {
         self.widgets.clear(); self.hover = None; self.focus = None;
-        self.scroll_offset = 0; self.selected_row = None;
+        self.scroll_offset = 0; self.selected_row = None; self.slider_click = false;
     }
     pub fn get(&self, id: u32) -> Option<&Widget> { self.widgets.iter().find(|w| w.id == id && w.visible) }
     pub fn get_mut(&mut self, id: u32) -> Option<&mut Widget> { self.widgets.iter_mut().find(|w| w.id == id) }
@@ -279,12 +281,17 @@ impl Ui {
     }
 
     pub fn mouse_down(&mut self, x: i32, y: i32) -> Event {
-        let Some(i) = self.hit(x, y) else { return Event::None; };
+        let Some(i) = self.hit(x, y) else {
+            // 对应 HotkeysTab_MouseDown：点击空白处夺走 TextBox 焦点
+            self.focus = None;
+            return Event::None;
+        };
         let id = self.widgets[i].id;
         let kind = self.widgets[i].kind.clone();
         match kind {
             Kind::Slider { min, max, vertical, .. } => {
                 self.capture = Some(id);
+                self.slider_click = true;
                 let r = self.widgets[i].rect;
                 let v = slider_value(r, x, y, min, max, vertical);
                 self.set_value(id, v);
@@ -303,6 +310,7 @@ impl Ui {
     }
     pub fn mouse_move(&mut self, x: i32, y: i32) -> Event {
         if let Some(cap) = self.capture {
+            self.slider_click = false;
             if let Some(w) = self.widgets.iter().find(|w| w.id == cap) {
                 let (min, max, vertical, r) = match &w.kind {
                     Kind::Slider { min, max, vertical, .. } => (*min, *max, *vertical, w.rect),
@@ -328,15 +336,19 @@ impl Ui {
     pub fn wheel(&mut self, x: i32, y: i32, delta: i32) -> Event {
         let Some(i) = self.hit(x, y) else { return Event::None; };
         let id = self.widgets[i].id;
-        let step = if delta > 0 { 0.05 } else { -0.05 };
-        match self.widgets[i].kind.clone() {
-            Kind::Slider { min, max, value, .. } => {
-                let v = (value + step).clamp(min, max);
-                self.set_value(id, v);
-                Event::Value(id, v)
-            }
-            _ => Event::Wheel(id, delta),
-        }
+        // 对应 DimmerSlider_MouseWheel / MinSlider_MouseWheel：
+        // 常规 ±5%，Ctrl 或右键按 ±1%；小范围滑块（如最小亮度 0.01–0.40）固定 ±1%
+        let fine = unsafe { GetAsyncKeyState(VK_CONTROL) != 0 || GetAsyncKeyState(0x02) != 0 };
+        let (min, max, value, is_slider) = match &self.widgets[i].kind {
+            Kind::Slider { min, max, value, .. } => (*min, *max, *value, true),
+            _ => (0.0, 0.0, 0.0, false),
+        };
+        if !is_slider { return Event::Wheel(id, delta); }
+        let mag = if (max - min) < 0.5 { 0.01 } else if fine { 0.01 } else { 0.05 };
+        let step = if delta > 0 { mag } else { -mag };
+        let v = (value + step).clamp(min, max);
+        self.set_value(id, v);
+        Event::Value(id, v)
     }
 }
 

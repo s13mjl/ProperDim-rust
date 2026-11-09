@@ -89,12 +89,22 @@ pub fn create_control_panel(_instance: HINSTANCE) -> HWND {
     ctx.min_h = s(200);
     ctx.resizable = true;
     let a = app::app();
-    let (lw, lh) = (a.settings.control_panel_width as i32, a.settings.control_panel_height as i32);
+    // 对应 Window_Loaded：宽度上限 525、强制 350/200 宽高比
+    let cw = a.settings.control_panel_width.min(525.0) as i32;
+    let ch = (cw as f64 / (350.0 / 200.0)).round() as i32;
     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-    let (x, y) = if a.settings.control_panel_left >= 0.0 && a.settings.control_panel_top >= 0.0 {
-        (a.settings.control_panel_left as i32, a.settings.control_panel_top as i32)
-    } else { (sw / 2 - s(lw) / 2, sh / 2 - s(lh) / 2) };
-    ui::create_window(&cls, "ProperDim Control Panel", x, y, s(lw), s(lh),
+    let (vx, vy, vw, vh) = unsafe {
+        (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+         GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN))
+    };
+    let (left, top) = (a.settings.control_panel_left, a.settings.control_panel_top);
+    // 对应 Window_Loaded 的位置合法性校验（防止窗口跑到屏幕外）
+    let valid = left >= 0.0 && top >= 0.0
+        && left < (if vw > 0 { vw } else { sw }) as f64 - 50.0
+        && top < (if vh > 0 { vh } else { sh }) as f64 - 50.0;
+    let (x, y) = if valid { (left as i32, top as i32) }
+        else { (vx + sw / 2 - s(cw) / 2, vy + sh / 2 - s(ch) / 2) };
+    ui::create_window(&cls, "ProperDim Control Panel", x, y, s(cw), s(ch),
         WS_EX_TOOLWINDOW, ctx, false)
 }
 
@@ -129,6 +139,24 @@ pub fn reset_panel_state(hwnd: HWND) {
         ctx.ui.scroll_offset = 0;
         ctx.ui.selected_row = None;
         ui::relayout_public(ctx, cr.width(), cr.height());
+        unsafe { InvalidateRect(hwnd, std::ptr::null(), FALSE); }
+    }
+}
+
+/// 对应 ScheduleEvaluated / ScheduleTriggered 订阅的 `RefreshList()`。
+pub fn refresh_schedule_list(hwnd: HWND) {
+    if hwnd == NULL { return; }
+    if unsafe { CURRENT_TAB } != 1 { return; }
+    let mut cr = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut cr); }
+    if let Some(ctx) = unsafe { (ui::get_ctx(hwnd) as *mut WindowCtx).as_mut() } {
+        let (scroll, sel, focus, capture) =
+            (ctx.ui.scroll_offset, ctx.ui.selected_row, ctx.ui.focus, ctx.ui.capture);
+        ui::relayout_public(ctx, cr.width(), cr.height());
+        ctx.ui.scroll_offset = scroll;
+        ctx.ui.selected_row = sel;
+        ctx.ui.focus = focus;
+        ctx.ui.capture = capture;
         unsafe { InvalidateRect(hwnd, std::ptr::null(), FALSE); }
     }
 }
@@ -398,7 +426,12 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                 app::app().last_user_interaction = app::now_ms();
                 app::app().settings.last_opacity = v;
                 app::trigger_save();
-                app::apply_brightness(v, false, false, 0, false);
+                if ctx.ui.slider_click {
+                    // 对应 Slider_ValueChanged 的非拖动分支：ApplyBrightnessAnimated(200ms)
+                    app::apply_brightness(v, true, false, 200, false);
+                } else {
+                    app::apply_brightness(v, false, false, 0, false);
+                }
             } else if id == ID_SCHEDULE_SCROLL {
                 ctx.ui.scroll_offset = v.round() as i32;
                 relayout(ctx, hwnd);
@@ -503,6 +536,7 @@ pub fn on_tray_menu(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         },
         Event::Value(id, v) => {
             if id == ID_MENU_SLIDER {
+                app::app().last_user_interaction = app::now_ms();
                 app::app().settings.last_opacity = v;
                 app::trigger_save();
                 app::apply_brightness(v, false, false, 0, false);
@@ -568,8 +602,11 @@ pub fn sync_brightness(hwnd: HWND, v: f64) {
                 ctx.ui.set_value(ID_SLIDER, v);
             }
             WindowKind::TrayMenu => {
-                ctx.ui.set_text(ID_MENU_VALUE, &pct);
-                ctx.ui.set_value(ID_MENU_SLIDER, v);
+                // 对应 TrayMenuWindow.OnGlobalBrightnessChanged 的 300ms 防抖
+                if app::now_ms() - app::app().last_user_interaction >= 300 {
+                    ctx.ui.set_text(ID_MENU_VALUE, &pct);
+                    ctx.ui.set_value(ID_MENU_SLIDER, v);
+                }
             }
             _ => {}
         }
@@ -585,5 +622,9 @@ pub fn toggle_tray_menu() {
     if a.hwnd_tray_menu != NULL && unsafe { IsWindowVisible(a.hwnd_tray_menu) } != 0 {
         unsafe { ShowWindow(a.hwnd_tray_menu, SW_HIDE); }
         app::remove_mouse_hook();
+        // 对应 IsVisibleChanged 隐藏分支
+        app::app().last_menu_close_tick = app::now_ms();
+        app::set_tooltip_brightness();
+        app::check_and_close_overflow();
     } else { show_tray_menu(); }
 }

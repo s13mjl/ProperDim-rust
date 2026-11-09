@@ -87,6 +87,7 @@ fn show_or_create(slot: &mut HWND, cls_name: &str, title: &str, cw: i32, ch: i32
         ui::relayout_public(ctx, cr.width(), cr.height());
     }
     center_window(h, s(cw), s(ch));
+    app::begin_modal(); // 对应 ShowDialog()
     unsafe { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); InvalidateRect(h, std::ptr::null(), FALSE); }
 }
 
@@ -104,9 +105,16 @@ pub fn show_schedule(edit: Option<usize>) {
                 SCH_TIME = sc.time;
                 SCH_PM = sc.time.0 >= 12;
                 SCH_BRIGHTNESS = sc.brightness;
-                for (k, d) in UI_SHORT.iter().enumerate() {
-                    let full = DimSchedule::full_days()[(k + 1) % 7];
-                    SCH_DAYS[k] = sc.days.is_empty() || sc.days.contains(d) || sc.days.contains(full);
+                // 对应 SetDayCheckboxes：兼容 "Mo" / "M" / "Monday" 等形式，按 ',' 与 ' ' 分割
+                let parts: Vec<&str> = sc.days.split(|c| c == ',' || c == ' ')
+                    .filter(|s| !s.is_empty()).collect();
+                let aliases = [("Mo", "M", "Monday"), ("Tu", "T", "Tuesday"),
+                    ("We", "W", "Wednesday"), ("Th", "", "Thursday"),
+                    ("Fr", "F", "Friday"), ("Sa", "S", "Saturday"),
+                    ("Su", "", "Sunday")];
+                for k in 0..7 {
+                    let (a1, a2, full) = aliases[k];
+                    SCH_DAYS[k] = parts.iter().any(|p| *p == a1 || *p == full || (!a2.is_empty() && *p == a2));
                 }
             }
         } else {
@@ -142,7 +150,10 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.widgets.push(mk(ID_SCH_MINUTE, 139, 58, 65, 24, Kind::Combo(format!("{:02}", minute))));
     ctx.ui.widgets.push(mk(ID_SCH_AM, 210, 58, 42, 24, Kind::Radio("AM".into(), !pm && !is24)));
     ctx.ui.widgets.push(mk(ID_SCH_PM, 254, 58, 42, 24, Kind::Radio("PM".into(), pm && !is24)));
-    if is24 { ctx.ui.set_enabled(ID_SCH_AM, false); ctx.ui.set_enabled(ID_SCH_PM, false); }
+    if is24 {
+        ctx.ui.set_visible(ID_SCH_AM, false);
+        ctx.ui.set_visible(ID_SCH_PM, false);
+    }
 
     ctx.ui.widgets.push(mk(ID_SCH_24H, 20, 88, 220, 20,
         Kind::CheckBox("Use 24-hour clock".into(), is24)));
@@ -165,11 +176,17 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     }
     // 对应 ValidateTime：时段冲突时把 Add 按钮改为提示文案并禁用（不是弹窗）
     let actual_hour = if is24 { hour } else if pm { (hour % 12) + 12 } else { hour % 12 };
+    let cur_days: Vec<&str> = UI_SHORT.iter().enumerate()
+        .filter(|(k, _)| days[*k]).map(|(_, d)| *d).collect();
     let conflict = app::app().settings.saved_schedules.iter().enumerate().any(|(i, sc)| {
-        sc.time == (actual_hour, minute) && Some(i) != app::app().edit_schedule_index
+        if sc.time != (actual_hour, minute) || Some(i) == app::app().edit_schedule_index { return false; }
+        // 上游：时间相同且「星期集合有交集」才算冲突
+        let parts: Vec<&str> = sc.days.split(|c| c == ',' || c == ' ')
+            .filter(|s| !s.is_empty()).collect();
+        parts.iter().any(|p| cur_days.contains(p))
     });
     let label = if conflict { "Timeslot already scheduled".to_string() }
-        else if editing { "Update Event".into() } else { "Add to Schedule".into() };
+        else if editing { "Update Event".into() } else { "Add Event".into() };
     let bw = if conflict { 200 } else { 130 };
     let mut btn = mk(ID_SCH_ADD, (w - bw) / 2, 218, bw, 25, Kind::Button(label));
     btn.enabled = !conflict;
@@ -198,7 +215,7 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => {
             match id {
-                ID_CLOSE => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); },
+                ID_CLOSE => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); app::end_modal(); },
                 ID_SCH_HOUR => {
                     let (h, m) = unsafe { SCH_TIME };
                     let is24 = unsafe { SCH_24H };
@@ -236,7 +253,11 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         }
         Event::Check(id, v) => {
             if id == ID_SCH_24H {
-                unsafe { SCH_24H = v; }
+                unsafe {
+                    // 对应 Is24hCheck_Changed：切回 12 小时制时同步 AM/PM，并隐藏 AM/PM 控件
+                    if !v { SCH_PM = SCH_TIME.0 >= 12; }
+                    SCH_24H = v;
+                }
                 app::app().settings.use_military_time = v;
                 app::trigger_save();
                 relayout_hwnd(ctx, hwnd);
@@ -272,18 +293,26 @@ fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     let short = UI_SHORT;
     let mut day_str = String::new();
     for (i, d) in short.iter().enumerate() {
-        if days[i] { if !day_str.is_empty() { day_str.push(','); } day_str.push_str(d); }
+        if days[i] { if !day_str.is_empty() { day_str.push_str(", "); } day_str.push_str(d); }
     }
-    let all = day_str == "Mo,Tu,We,Th,Fr,Sa,Su";
+    let all = day_str == "Mo, Tu, We, Th, Fr, Sa, Su";
     let a = app::app();
     let duplicate = a.settings.saved_schedules.iter().enumerate().any(|(i, sc)| {
         sc.time == time && Some(i) != a.edit_schedule_index
     });
     // 上游通过 ValidateTime 禁用 Add 按钮；这里保留一道静默防线
     if duplicate { return; }
+    let mut st = SYSTEMTIME::default();
+    unsafe { GetLocalTime(&mut st); }
+    let now_stamp = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    // 对应 Add_Click：编辑时沿用旧 LastTriggered，新建时为 DateTime.Now（不是 MinValue）
+    let last_triggered = a.edit_schedule_index
+        .and_then(|i| a.settings.saved_schedules.get(i).map(|s| s.last_triggered.clone()))
+        .unwrap_or_else(|| now_stamp.clone());
     let sc = DimSchedule {
         time, brightness, days: if all { String::new() } else { day_str.clone() },
-        last_triggered: "0001-01-01T00:00:00".into(),
+        last_triggered,
     };
     if let Some(i) = a.edit_schedule_index {
         if i < a.settings.saved_schedules.len() { a.settings.saved_schedules[i] = sc; }
@@ -292,10 +321,11 @@ fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     }
     a.settings.saved_schedules.sort_by_key(|x| (x.time.0, x.time.1));
     // 对应 ScheduleDialog.xaml.cs:473 保存本次选择的星期
-    a.settings.last_schedule_days = if all { "Mo,Tu,We,Th,Fr,Sa,Su".into() } else { day_str };
+    a.settings.last_schedule_days = if all { "Mo, Tu, We, Th, Fr, Sa, Su".into() } else { day_str };
     a.edit_schedule_index = None;
     config::save(&a.settings);
     unsafe { ShowWindow(hwnd, SW_HIDE); }
+    app::end_modal();
     refresh_panel();
 }
 
@@ -349,7 +379,7 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
 pub fn on_min(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => match id {
-            ID_CLOSE | ID_MIN_CANCEL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); },
+            ID_CLOSE | ID_MIN_CANCEL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); app::end_modal(); },
             ID_MIN_PREVIEW => app::start_preview(unsafe { MIN_VALUE }),
             ID_MIN_OK => {
                 let v = unsafe { MIN_VALUE };
@@ -359,6 +389,7 @@ pub fn on_min(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                 let cur = a.current_brightness;
                 app::apply_brightness(cur, false, false, 0, false);
                 unsafe { ShowWindow(hwnd, SW_HIDE); }
+                app::end_modal();
             }
             _ => {}
         },
@@ -432,7 +463,7 @@ pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
 pub fn on_info(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     if let Event::Click(id) = ev {
         match id {
-            ID_CLOSE | ID_INFO_COOL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); },
+            ID_CLOSE | ID_INFO_COOL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); app::end_modal(); },
             ID_INFO_HELP => {
                 let path = app::readme_path();
                 let s = wide(&path.to_string_lossy());
@@ -498,6 +529,7 @@ pub fn on_warning(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         a.warning_result = Some(yes);
         let action = a.warning_action;
         unsafe { ShowWindow(hwnd, SW_HIDE); }
+        app::end_modal();
         if yes {
             match action {
                 WarningAction::ClearSchedule => {

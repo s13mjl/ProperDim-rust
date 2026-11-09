@@ -64,6 +64,8 @@ pub struct App {
     pub extra: ExtraApis,
     pub hook: isize,
     pub wts_registered: bool,
+    /// 模态对话框嵌套计数（对应 ShowDialog）：>0 时禁用主控制面板。
+    pub modal_depth: u32,
 }
 
 #[derive(Default)]
@@ -219,13 +221,50 @@ pub fn handle_tray_msg(lparam: LPARAM) {
 // ---------------------------------------------------------------------------
 // 窗口显示 / 生命周期
 // ---------------------------------------------------------------------------
+/// 对应 `ScheduleEvaluated` / `ScheduleTriggered` 事件订阅的 `RefreshList()`。
+pub fn refresh_panel_list() {
+    let h = app().hwnd_panel;
+    if h != NULL { ui::panels::refresh_schedule_list(h); }
+}
+
+/// 对应 `WarningMessage.ShowDialog` / 各对话框的 ShowDialog：禁用主窗口。
+pub fn begin_modal() {
+    let a = app();
+    a.modal_depth += 1;
+    if a.modal_depth == 1 && a.hwnd_panel != NULL {
+        unsafe { EnableWindow(a.hwnd_panel, FALSE); }
+    }
+}
+pub fn end_modal() {
+    let a = app();
+    a.modal_depth = a.modal_depth.saturating_sub(1);
+    if a.modal_depth == 0 && a.hwnd_panel != NULL {
+        unsafe { EnableWindow(a.hwnd_panel, TRUE); }
+    }
+}
+
+/// 对应 `ControlPanel_IsVisibleChanged`：面板隐藏时关闭所有子窗口。
+pub fn close_child_windows() {
+    let a = app();
+    let mut closed = 0u32;
+    for h in [a.hwnd_schedule, a.hwnd_min, a.hwnd_info, a.hwnd_warning] {
+        if h != NULL { unsafe { DestroyWindow(h); } closed += 1; }
+    }
+    a.hwnd_schedule = NULL;
+    a.hwnd_min = NULL;
+    a.hwnd_info = NULL;
+    a.hwnd_warning = NULL;
+    while closed > 0 && a.modal_depth > 0 { end_modal(); closed -= 1; }
+}
+
 pub fn show_control_panel() {
     let a = app();
     if a.hwnd_panel == NULL { a.hwnd_panel = ui::panels::create_control_panel(a.instance); }
     let h = a.hwnd_panel;
     if h == NULL { return; }
-    // 对应 ControlPanel_IsVisibleChanged / SyncSliderWithOpacity：显示时同步滑块
+    // 对应 ControlPanel_IsVisibleChanged / SyncSliderWithOpacity / OnActivated
     ui::panels::sync_brightness(h, a.current_brightness);
+    refresh_panel_list();
     unsafe { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); InvalidateRect(h, std::ptr::null(), FALSE); }
 }
 pub fn toggle_control_panel() {
@@ -235,6 +274,7 @@ pub fn toggle_control_panel() {
     a.last_toggle_tick = now;
     if a.hwnd_panel != NULL && unsafe { IsWindowVisible(a.hwnd_panel) } != 0 {
         unsafe { ShowWindow(a.hwnd_panel, SW_HIDE); }
+        close_child_windows();
     } else { show_control_panel(); }
 }
 pub fn hide_control_panel(handle_closure: bool) {
@@ -246,6 +286,7 @@ pub fn hide_control_panel(handle_closure: bool) {
     }
     if a.hwnd_panel != NULL {
         unsafe { ShowWindow(a.hwnd_panel, SW_HIDE); }
+        close_child_windows();
         if handle_closure { ui::panels::reset_panel_state(a.hwnd_panel); }
     }
 }
@@ -363,6 +404,8 @@ fn local_now() -> SYSTEMTIME {
 }
 
 pub fn schedule_tick() {
+    // 对应 ScheduleEvaluated?.Invoke() -> RefreshList（无条件，每 10 秒重排）
+    refresh_panel_list();
     let a = app();
     if !a.settings.schedule_toggle { return; }
     let st = local_now();
@@ -384,9 +427,8 @@ pub fn schedule_tick() {
     a.settings.last_opacity = v;
     config::save(&a.settings);
     apply_brightness(v, true, false, 200, false);
-    if a.hwnd_panel != NULL {
-        unsafe { InvalidateRect(a.hwnd_panel, std::ptr::null(), FALSE); }
-    }
+    // 对应 ScheduleTriggered?.Invoke() -> RefreshList
+    refresh_panel_list();
 }
 
 /// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant 算法），用于比较 `DateTime`。
@@ -451,9 +493,8 @@ pub fn evaluate_missed_schedules(animate: bool) {
         a.settings.last_opacity = v;
         config::save(&a.settings);
         apply_brightness(v, animate, false, 1500, false);
-        if a.hwnd_panel != NULL {
-            unsafe { InvalidateRect(a.hwnd_panel, std::ptr::null(), FALSE); }
-        }
+        // 对应 ScheduleTriggered?.Invoke() -> RefreshList
+        refresh_panel_list();
     } else {
         let v = a.settings.last_opacity;
         apply_brightness(v, animate, false, 1500, false);
@@ -505,6 +546,8 @@ pub fn resync_displays() {
     a.current_brightness = 1.0;
     config::save(&a.settings);
     apply_brightness(1.0, false, false, 0, false);
+    // 对应 ResetBrightness_Click 的 SyncSliderWithOpacity(1.0)：强制滑块回到 100%
+    if a.hwnd_panel != NULL { ui::panels::sync_brightness(a.hwnd_panel, 1.0); }
 }
 
 pub fn shutdown_app() {
