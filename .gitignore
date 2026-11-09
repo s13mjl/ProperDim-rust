@@ -1,9 +1,21 @@
-# Rust 构建产物
+# ---- Rust 构建产物 ----
 /target/
 *.pdb
 *.exe
+*.res
+*.obj
 
-# 运行时生成
+# ---- 运行时生成 ----
 settings.json
 __properdim_write_test__.tmp
 CrashLogs/
+bench.txt
+
+# ---- 调试 / 临时产物 ----
+preview/_*.png
+*.log
+
+# ---- 系统垃圾 ----
+Thumbs.db
+Desktop.ini
+.DS_Store

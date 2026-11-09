@@ -1,274 +1,88 @@
-# ProperDim 1.4.6 — Rust 移植版
+# ProperDim · Rust 移植版
 
-原项目：`../ProperDim`（C# / .NET 10 / WPF）
-本目录：**Rust + 纯 Win32 / GDI + 原生弹出菜单**，零第三方 crate，只依赖 Rust 标准库与 Windows 系统 DLL。
+把 [ProperDim](https://github.com/crustyoldhuman/ProperDim)（C# / WPF 的屏幕调光工具）用 **Rust + 纯 Win32 / GDI** 重写了一遍：
+零第三方 crate、单个 exe、常驻内存约 15 MB，不需要 .NET 运行时。
 
-> 第一轮：前端 6 个窗口 + 后端主流程。
-> 第二轮：差异 2/3/6/7/8/9 与 `NativeMethods.cs` 暴露的后端缺口。
-> 第三轮：按上游 **198 个方法 / 64 个 XAML 事件绑定** 逐项核对，补齐交互逻辑与文案，并修正前两轮 README 中过满的「已 1:1」表述。
-> 第四轮：逐段读方法体，补齐数据格式、事件订阅、模态窗口、启动自修复、崩溃恢复、滚轮步进等剩余行为差异。
-> 第五轮：**真正逐行通读上游全部 14 个 `.cs`（5246 行）与 Rust 全部 9 个 `.rs`**，逐语句对照——抓到了前四轮「按方法名/清单抽样」结构性漏掉的一批 bug，包括**亮度动画实际只走第一帧**、**日程列表滚动完全失效**、**AM/PM 单选按钮无效**。
-> 第六轮：修用户实测反馈的四个问题——亮度调节卡顿、滑块圆点锯齿、链接文字偏左、exe 没有图标。
-> 第八轮：拖动时数字不跟随、拖动本身发涩、Cool 返回时主窗口闪一下——三条都从机制上修掉。
-> 第九轮：去掉点滑块后出现的白框（焦点框）。
-> 第七轮：**用实测数据定位卡顿真因**（`SetDeviceGammaRamp` 单次阻塞 11ms + `WM_TIMER` 会被合并），改为「gamma 工作线程 + 消息循环驱动动画」；按钮改为松开触发；Info 内容按需求精简。
+![控制面板](preview/frontend.png)
 
-## 快速开始
+## 功能
+
+- **全局亮度调节**：硬件 gamma LUT + Magnification 两层叠加，1% – 100% 无级调节，带缓动动画
+- **多显示器**：逐屏应用，识别虚拟屏 / 远程桌面 / 采集卡，读取 HDR 状态
+- **定时计划**：按「时间 + 星期」触发；开机、锁屏解锁、休眠唤醒后自动补上错过的计划
+- **全局热键**：点一下输入框，按什么键就是什么键，即时生效
+- **托盘 + QuickDim**：托盘左键开面板、右键弹滑块，滚轮按 5% 吸附
+- **最低亮度下限**：给夜间使用留一条安全底线，防止热键把屏幕按到全黑
+- **配置**：`settings.json` 与 C# 版完全兼容，可直接互读（优先存 exe 同目录，不可写时用 `%LOCALAPPDATA%\ProperDim\`）
+
+## 下载
+
+到 [Releases](https://github.com/s13mjl/ProperDim-rust/releases) 下载 `ProperDim.exe`，双击就能用：
+
+- 免安装，不用 .NET 运行时，单个文件约 825 KB
+- 需要 Windows 10 及以上（x64）
+- 卸载时复位亮度用 `ProperDim.exe --reset`（对应上游 Inno Setup 的卸载钩子）
+
+## 使用
+
+| 操作 | 说明 |
+|---|---|
+| 托盘左键 | 打开控制面板 |
+| 托盘右键 | 弹 QuickDim 滑块（Options 里可切换成原生菜单 / 互换左右键） |
+| 控制面板 ✕ | 最小化到托盘（Options 里可改成直接退出） |
+| Ctrl + 滚轮 | 精确 1% 调亮度，否则按 5% 吸附 |
+| Tab / Shift+Tab | 键盘遍历控件 |
+
+## 从源码构建
 
 ```bash
-cargo build --release --offline          # 零依赖，无需联网
-cargo test --offline                     # 17 个单元测试
-target/release/ProperDim.exe             # 正常运行（会真正调节屏幕亮度）
-target/release/ProperDim.exe --demo      # 只演示界面，后端打桩、不改屏幕亮度
-target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步亮度复位
-target/release/ProperDim.exe --bench     # 性能实测，结果写到同目录 bench.txt
+cargo build --release --offline     # 零依赖，不需要联网
+cargo test --offline                # 17 项单元测试
 ```
 
-`--demo` 等价环境变量 `PROPERDIM_DEMO=1`。配置文件与 C# 版**共用同一份 `settings.json`**
-（MSIX 包内用 `%LOCALAPPDATA%\ProperDim\`，否则优先 exe 同目录），字段与 System.Text.Json 格式一致，可直接互读。
-`ProperDim_README.txt` 已内嵌，首次运行写到 exe 同目录（对应 csproj 的 `CopyToOutputDirectory=Always`）。
+产物是 `target/release/ProperDim.exe`。另外两个调试入口：
 
-## 实测结果（本机，Windows 11 / Rust 1.98 MSVC）
-
-| 指标 | 原 C# / WPF 版 | Rust 版（demo，含控制面板窗口） |
-|---|---|---|
-| 进程工作集 | ~90 MB | **14,124 KB ≈ 13.8 MB** |
-| 可执行文件 | 64.1 MB（Portable 自包含单文件） | **825 KB**（其中约 500 KB 是 7 个尺寸的图标资源） |
-| 外部依赖 | .NET 10 Desktop Runtime + 3 个 NuGet 包 | 无（仅系统 DLL） |
-
-最终构建 `tasklist` 实测输出：`"ProperDim.exe","29140","Console","1","14,124 K"`。
-进程正常运行、无崩溃；界面预览见 `preview/frontend.png` 与 `preview/dialogs.png`。
-
-## 目录与映射
-
-| Rust 文件 | 对应 C# 源文件 | 内容 |
-|---|---|---|
-| `src/native.rs` | `NativeMethods.cs` + `app.manifest` | 全部 Win32 常量/结构体/DllImport；Magnification / dwmapi / shcore / wtsapi32 / MSIX 动态加载；结构体布局断言 |
-| `src/theme.rs` | `App.xaml` 全局样式 + 各 ControlTemplate | 暗色主题、双缓冲 GDI、圆角窗口、自绘控件、滚动/选中状态 |
-| `src/config.rs` | `ConfigManager.cs` / `AppSettings` / `DimSchedule.cs` | 全部 26 个字段、TimeSpan/Days 格式、手写 JSON、MSIX/可写性路径 |
-| `src/backend.rs` | `HardwareGammaService.cs` / `GlobalHotkeyService.cs` / `MainWindow.RefreshMonitors()` | gamma LUT、watchdog、Magnification、显示器枚举、虚拟屏黑名单、`QueryDisplayConfig` 友好名/HDR、热键解析、`StubBackend` |
-| `src/app.rs` | `App.xaml.cs` / `MainWindow.xaml.cs` | 单实例、托盘与原生菜单、亮度映射与动画、热键、计划、错过补偿、会话/电源、鼠标钩子、溢出窗口、崩溃日志 |
-| `src/ui/mod.rs` | WPF `Window` / `WindowChrome` / `Dispatcher` | 统一窗口类与 WndProc、消息路由、标题栏拖动、DPI、键盘、尺寸位置持久化 |
-| `src/ui/panels.rs` | `ControlPanel.xaml(.cs)` / `TrayMenuWindow.xaml(.cs)` | 控制面板 4 个 Tab、热键录制、QuickDim、日程排序/滚动/编辑、HKCU 自启动 |
-| `src/ui/dialogs.rs` | 4 个对话框 | 完整控件、时段/星期、预览、校验、确认动作、尺寸持久化 |
-| `src/main.rs` | `App.OnStartup` | 入口、参数、单实例、DPI、控制器窗口、定时器、会话通知、消息循环 |
-
-## 前两轮已完成的对齐
-
-- **差异 2/3/6/7/8/9**：Combo 0–59、热键录制并即时注册、WTS 会话/电源恢复与关机复位、错过计划逐条比 `LastTriggered`、窗口尺寸位置持久化、`--reset` 顺序与强制色效复位/帮助文件/CrashLogs 格式。
-- **后端审计补齐**：`WH_MOUSE_LL` 全局滚轮钩子、`Shell_NotifyIconGetRect` 托盘定位与任务栏方位、`CheckAndCloseOverflow`、DWM 窗口属性与主题检测、DisplayConfig 友好名/HDR、MSIX 生效、托盘 GUID、键盘 Apps/Shift+F10/Enter/Space、`WS_EX_LAYERED`。
-- 前端配色/尺寸/控件/滑块/预览按钮/resize grip/圆角/标题栏图标。
-
-## 第三轮：交互逻辑与文案
-
-| 上游逻辑 | 本轮实现 |
-|---|---|
-| `HandleClosure` | `CloseToTray=false` 时真正退出（原先永远 Hide）；关闭时 Tab 归零、列表滚回顶部 |
-| `RefreshList` | 按「未来 7 天内下一次触发时间」排序（未来在上、无后续排末尾）；新增可拖动滚动条、滚轮滚动 |
-| `ScheduleList_MouseDoubleClick` / `PreviewKeyDown` | 双击行编辑、上下键选中、Enter 编辑、Delete 删除 |
-| `ToggleScheduleUI` | 未启用计划时置灰并禁用 `+` 按钮与列表交互 |
-| `ApplySavedSize` / `Window_SizeChanged` | 4 个对话框读取并回写各自宽高；`LastScheduleDays` 新建计划后持久化 |
-| `RegisterClassHandler` / `MainTabs_PreviewKeyDown` / `TabsArea_MouseWheel` | 全局 CheckBox(Enter) / Hyperlink(Enter+Space)；左右键与滚轮切 Tab |
-| `ApplyPreview` / `EndPreview` | `_isPreviewActive` 隔离（预览时阻止滑块被回写覆盖）、500ms 用户交互防抖；预览按钮键盘按住、松开/移出恢复 |
-| `Hyperlink_RequestNavigate` / `HelpLink_Click` | 打开失败弹 `Unable to open link: ` / `Unable to open help file: ` 提示 |
-| 托盘 ToolTip | 菜单显示时清空、隐藏时恢复 |
-| `ValidateTime` | 时段冲突时把 Add 按钮改为 `Timeslot already scheduled` 并禁用（**上游不是弹窗**，前两轮实现错了） |
-
-**文案逐条校正**（前两轮因只抓了 `Text=`/`Content=`、漏了 `<Run>`/Inlines，部分说明文字是我自己编的）：
-
-- `MinBrightnessDialog`：*"Adjust the slider below to set the absolute minimum brightness."* / *"TIP: Enable hotkeys before saving changes here so you can't accidentally blackout your screen."*
-- `ControlPanel` 链接：`Adjust Minimum`（原先误写 `Adjust Minimum Brightness`）
-- Clear Schedule：*"You are about to completely wipe all of your scheduled events. Is this what you truly desire?"*
-- Reset Brightness：*"You are about to reset your brightness settings. Your schedule will remain intact. Is this what you truly desire?"*
-- 未选星期提示按钮文案 `Oops`；链接/帮助文件错误提示文案。
-
-同时纠正两处此前的错误结论：`GlobalBrightnessChanged` 在上游**只订阅 ControlPanel / TrayMenuWindow**（ScheduleDialog / MinDialog 本就不联动，不是缺口）；`UpdateDimmerOpacity` 是 `ApplyBrightnessAnimated` 的包装，不是「滑块透明度随亮度变化」。
-
-## 第四轮：按方法体逐段核对后的补齐
-
-| 上游逻辑 | 本轮实现 |
-|---|---|
-| `Add_Click` | 新建计划 `LastTriggered = DateTime.Now`（之前误用 MinValue）、`Days` 用 `", "` 连接（之前无空格）、保存 `UseMilitaryTime` |
-| `ValidateTime` | 冲突条件补上**星期集合交集**判断（之前只比时间）；按钮原文改为 `Add Event` / `Update Event` / `Timeslot already scheduled` |
-| `SetDayCheckboxes` | 兼容 `Mo` / `M` / `Monday` 等别名，按 `,` 与空格分割 |
-| `Is24hCheck_Changed` | 切回 12 小时制时同步 AM/PM（之前会把 20:00 显示成 08 AM），并隐藏 AM/PM 控件 |
-| `ScheduleEvaluated` / `ScheduleTriggered` | 两个事件在上游都订阅 `RefreshList`：10 秒评估无条件重排、触发后重排（之前只重绘不排序） |
-| `ControlPanel_IsVisibleChanged` | 面板隐藏时销毁所有子窗口（之前子窗口会残留） |
-| `ShowDialog()` | 4 个对话框改为模态：禁用主窗口 + 嵌套深度计数，关闭时恢复 |
-| `OnActivated` / `Window_Loaded` | 显示时重排列表；位置合法性校验（`VirtualScreen - 50`）、350:200 宽高比、宽度上限 525 |
-| `Window_Loaded` SELF-REPAIR | 启动时把注册表自启动项重写为当前 exe 路径，清除旧版本残留 |
-| `UnhandledException` | panic hook 增加 `EmergencyReset`：恢复 gamma / Magnification（之前只写日志，崩溃后屏幕可能保持暗） |
-| `Slider_ValueChanged` / `MouseWheel` | 滑块点击（非拖动）走 200ms 动画；滚轮 ±5%，Ctrl/右键 ±1%，小范围滑块 ±1%；空白处也能滚动列表 |
-| `TrayMenuWindow.OnGlobalBrightnessChanged` | 300ms 用户交互防抖；隐藏时补 `lastTrayMenuCloseTime` / ToolTip 恢复 / 溢出窗口关闭 |
-| `HotkeysTab_MouseDown` | 点击空白处取消 TextBox 焦点 |
-| `ResetBrightness_Click` | 确认后强制把主滑块同步到 100% |
-
-同时新增两个只读审计工具：`tools/dump_methods.py`（按方法名抽取上游方法体）与 `tools/audit_literals.py`（字面量/常量比对），便于后续继续核对。
-
-## 第五轮：逐行通读后的补齐（本轮最重要）
-
-前四轮的核对方式是「列方法名 → 挑可疑的抽方法体 → 凭经验推断」，这必然只能发现**我已经想到的**差异。本轮改成把上游 14 个 `.cs` 从头到尾读一遍、再读全部 Rust，逐语句比对。结果抓到 27 处，其中 3 处是会让功能直接失效的硬 bug：
-
-### 三个硬 bug
-
-1. **亮度动画只走第一帧**。`apply_brightness` 的非动画分支无条件执行 `a.anim.active = false`，而动画每帧正是通过这条路径写硬件——第一帧之后动画就被自己关掉了；`TIMER_ANIM` 还在跑，但 `anim_tick` 直接 return，且因为没有走到 `done` 分支，定时器也永不 `KillTimer`。表现是拖动/点击滑块后亮度几乎不变、停在起点附近。修法是补上上游的 `_isUpdatingFromAnimator` 语义（`anim_updating` 标志），并加回归测试 `brightness_pipeline` 断言动画必须收敛到目标值。
-2. **日程列表滚动完全失效**。`Ui::clear()` 在每次重建控件树时把 `scroll_offset` / `selected_row` 清零，而布局正是「先 clear 再读 scroll_offset」——拖动滚动条和滚轮改的值立刻被抹掉。滚动/选中属于视图状态，不能跟着控件树清空。
-3. **AM/PM 单选按钮点了不生效**。`Kind::Radio` 落在 CheckBox 分支返回 `Event::Check`，而日程对话框的 `Event::Check` 只处理 24 小时开关和星期——点击只改了控件自身的高亮，`SCH_PM` 从未变化。改为互斥组语义（点击即置位 + 走 `Event::Click`）。
-
-### 其余修正
-
-| 上游逻辑 | 本轮修正 |
-|---|---|
-| `ApplyBrightness` 第 1 步 | 不忽略最小值时逻辑亮度必须 `Max(0.01, ...)`；之前 0.0 会直接传给后端、算出低于 floor 的硬件值 |
-| 动画起点 | 用「当前**硬件**亮度折算回新逻辑坐标系」作为起点（`0.01 + (last-floor)/(1-floor)*0.99`），改 GlobalMinimum 后不再闪跳 |
-| TrayIcon.ToolTipText | 只在「非动画帧」且「QuickDim 不可见」时刷新；之前每 16ms 刷一次，且菜单打开时也在刷 |
-| `DimmerSlider_MouseWheel` | 改为 5% 网格吸附公式（`((cur+4)/5)*5`，向上且恰为网格点时 +5），不是简单 ±0.05 |
-| `DialogDimmerSlider` / `MinSlider` 滚轮 | 固定 ±1%（与滑块总跨度无关），用 `tag="fine"` 区分 |
-| `TabsArea_MouseWheel` | 方向搞反了：`Delta>0` 应是**下一个** Tab |
-| `ScheduleList_MouseDoubleClick` | 单行单击只选中；打开编辑器必须双击或 Enter（之前单击就弹窗） |
-| `ScheduleCheckbox_Checked` | 勾选后立即 `EvaluateMissedSchedules(animate, 1500)` |
-| `HandleClosure` / 各对话框 `PreviewKeyDown` | Esc 走 `HandleClosure`（受 `CloseToTray` 影响）；对话框 Esc = 关闭，Warning 记为 `No` |
-| `Minimize_Click` | 真正 `WindowState.Minimized`：控制面板去掉 `WS_EX_TOOLWINDOW`、加 `WS_MINIMIZEBOX`，才有任务栏按钮可最小化 |
-| `DialogDimmerSlider.Minimum` | 日程对话框滑块下限是 `GlobalMinimum`，不是 0.01 |
-| Add 模式默认值 | 「当前时间」+ `Max(Minimum, LastOpacity)`；之前写死 12:00 / 100% |
-| `Add_Click` 的 `Days` | 永远写显式列表（`"Mo, Tu, ..., Su"`），上游**从不写空串**——写空串会让 `RefreshList` 的 `Days.Contains("Mo")` 为 false，把「每天」的计划排到列表最末 |
-| `ActiveSchedules` 顺序 | 不再按时间重排：上游保持插入顺序，显示顺序由 `RefreshList` 的排序副本决定 |
-| `ValidateTime` | 重复校验也必须带星期交集，否则同时间不同星期会被误挡 |
-| `DayCheck_Changed` | 勾选星期后立即重算冲突状态（Add 按钮文案/禁用） |
-| `ApplySavedSize` | 4 个对话框实现真正的「最小尺寸校验 + 宽度回算高度 + 500/450/480 上限」；日程对话框默认高度应是 **290**（320/(320/290)），之前是 280 |
-| `WindowStartupLocation=CenterOwner` | 对话框居中改为跟随控制面板所在显示器，不再固定主屏 |
-| `DialogSlider_ValueChanged` / `MinSlider_PreviewMouseMove` | 拖动时实时预览（`ApplyPreview(v, false)`）；松手按**当前** `LastOpacity` 还原，预览期间用热键调过亮度也能被尊重 |
-| `HotkeyTextBox_PreviewKeyDown` | 录制支持 OEM / 小键盘 / 媒体键，并与解析表一一对应；之前录出 `;`、`NumPad5` 之类字符串无法注册成热键 |
-| `RegisterClassHandler` | 键盘响应改为跟随**焦点**（之前跟随鼠标悬停），并补上 Tab / Shift+Tab 焦点遍历与虚线焦点框 |
-| `TrayMenuWindow.Window_IsVisibleChanged` | 补上「图标在溢出浮出窗口」分支（贴光标弹出）、12px 任务栏间距、`Activate()`+`Focus()`（失去焦点才会自动收起） |
-| `TrayMenuWindow.PreviewKeyDown` | 补上上下键调亮度（Ctrl ±1%，否则 5% 网格，走动画） |
-| `ResizeThumb_DragDelta` | 面板 525、对话框 500/450/480 的拖拽上限（`WM_GETMINMAXINFO`） |
-| `AppSettings` 默认值 | `AppInfoWindowHeight` 改回上游的 384（其 `MinHeight` 是 394，所以首次运行本就不套用保存尺寸） |
-| `_parenthesesRegex` | 取第一个 `(` 之后的**第一个** `)`；之前用 `rfind` 会取到最后一个 |
-
-另外**删掉**一处我上一轮自己加的、上游根本没有的行为：`Delete` 键删除日程（`ScheduleList_PreviewKeyDown` 只处理 Enter/Space）。
-
-## 第六轮：用户实测反馈的四个问题
-
-| 问题 | 根因 | 修法 |
-|---|---|---|
-| **调节亮度一卡一卡** | 渲染路径每帧重建全部 GDI 对象：`Painter` 每次 `WM_PAINT` 新建 3 个字体、每个控件新建/销毁画刷与画笔，并 `CreateCompatibleBitmap` 分配一整块 DIB；`HardwareGammaService` 每帧 `CreateDC`/`DeleteDC`；另外 16ms 的 `SetTimer` 撞上 Windows 默认 15.6ms 时钟粒度，帧间隔忽长忽短；每个 `WM_MOUSEMOVE`（高刷鼠标 1000Hz）都整窗重绘 | ① 字体/画刷/画笔按 (尺寸,颜色) 缓存；② 后备缓冲改为「只增不减」的常驻 DIB，不再每帧分配；③ 显示器 DC 缓存，只在显示拓扑变化时释放；④ `timeBeginPeriod(1)` 提高时钟粒度；⑤ 鼠标移动后状态（hover/capture/滑块值）没变就不重绘 |
-| **滑块圆点有锯齿** | 圆点是 `RoundRect` + 纯色画刷，GDI 没有抗锯齿；上游是矢量 `Ellipse` | 用 GDI+（`GdiplusStartup` + `GdipFillEllipse`/`GdipDrawEllipse`，`SmoothingModeAntiAlias`）绘制；动态 `LoadLibrary`，取不到就回退 GDI。配色也对齐 XAML：填充 `#B8B8B8`、描边 `#7E7E7E` 2px |
-| **下划线蓝字偏左** | 链接文字用 `DT_LEFT` 画在一个居中的宽控件框里，文字从框左边界起排 | 改为 `DT_CENTER`（上游这些链接都在 `HorizontalAlignment="Center"` 的 `TextBlock` 里），下划线起点同步按文字宽居中；顺带修正 `View help`：上游是 `HorizontalAlignment="Right"` + `TextDecorations="None"`，本版原来既左对齐又多画了下划线 |
-| **exe 没有图标** | 从没生成过 Win32 资源；本机没装 Windows SDK 的 `rc.exe` | 新增 `build.rs`：直接手写 `.res`（RT_ICON + RT_GROUP_ICON），用 `cargo:rustc-link-arg` 交给 `link.exe`；图标取上游完整 8 尺寸 ico（去重后 7 个，含 256×256 PNG）。同时窗口补 `WM_SETICON`，Info 窗口的 65px 大图改用资源里的 64px 帧（原来是 16px 放大，糊） |
-
-新增回归测试：`thumb_uses_antialiased_gdiplus`（GDI+ 必须可用）、`icon_resource_embedded`（`LoadImage` + 资源管理器同款 `ExtractIconExW` 都能取到图标）、`repaint_is_cheap_enough_for_60fps`（单帧绘制预算 4ms，防止又退回逐对象创建）。
-
-## 第七轮：卡顿的真因（实测，不再靠猜）
-
-第六轮按「看起来慢的地方」优化了一轮，用户反馈仍卡。于是加了 `--bench` 实测模式，把一次亮度更新拆开计时：
-
-| 环节 | 单次耗时 | 说明 |
-|---|---|---|
-| `apply_brightness`（改值） | **11.1 ms** | 几乎全部是 `SetDeviceGammaRamp` |
-| `apply_brightness`（同值早退） | 0.055 ms | 说明 11ms 全在硬件写入 |
-| `SetDeviceGammaRamp`（<50%，含放大） | 11.1 ms | Magnification 本身可忽略 |
-| 面板整窗重绘 | 1.17 ms | GDI 缓存已生效 |
-| 托盘 ToolTip（NIM_MODIFY） | 0.17 ms | |
-
-**真因有两条**：
-
-1. **`SetDeviceGammaRamp` 单次阻塞约 11ms**（驱动在等垂直同步）。它跑在 UI 线程上，16ms 的帧预算立刻被吃掉，帧间隔只能是 16/31ms 交替。改法：新建一个 `properdim-gamma` 工作线程，UI 线程只把「目标值」投递到合并槽（同设备只保留最新值），**永不阻塞**；退出时 `stop()` 会先等这一批写完，保证亮度被复位。
-2. **`WM_TIMER` 会被系统合并**。它是低优先级消息，队列里还有其它消息时系统只给一拍——即使把间隔设成 16ms、并 `timeBeginPeriod(1)`，实测仍是 16/31 交替。改法：动画改由消息循环按截止时间驱动（`MsgWaitForMultipleObjectsEx` 超时 + 到期调 `anim_tick`），不再用定时器做帧时钟。
-
-同时把动画时间基准从 `GetTickCount64`（~15.6ms 分辨率，相邻两帧会算出同一进度 → 一半的帧是重复值）换成 QPC。
-
-实测对比（400ms 动画，采样每帧亮度变化时刻）：
-
-| | 帧间隔 avg | p50 | p95 | max |
-|---|---|---|---|---|
-| 修复前 | 24.8 ms | 31 | 31 | 31 |
-| 修复后 | **15.6 ms** | **16** | **16** | 31 |
-
-## 第七轮：交互与文案
-
-- **按钮改为「松开」触发**：原来 `Ui::mouse_down` 立刻返回 `Click`，点 Cool/OK 时窗口在鼠标还没松开就消失了，看起来像「窗口被隐藏」而不是「点了按钮」。现在按钮/链接记录按下态（有按下配色），只在**同一控件上松开**才触发；Tab / 复选框 / 滑块 / 预览按钮仍保持按下即生效（与 WPF 行为一致）。
-- **Cool 会「返回」**：Info 可以从 QuickDim/托盘菜单打开，那时控制面板本来就是隐藏的，直接关掉 Info 会让人以为什么都没了。现在关闭 Info 时若面板不可见就 `show_control_panel()`，可见则只把焦点还给面板。
-- **Info 内容精简**（按需求）：去掉 Twitch / YouTube / PayPal / "Created on" / "By ..." / "Like weird games?" 等推广行，只保留两个仓库地址——上游 `crustyoldhuman/ProperDim` 与本移植版 `s13mjl/ProperDim-rust`。`View help` 保留（它是功能入口，不是推广）。
-- 新增 `tools/probe_info_click.py`：真实点击 Info 的 Cool 并打印各窗口可见性，用来验证「返回」行为。
-
-## 第八轮：拖动手感与返回闪烁
-
-### 拖动时「Brightness Level」数字不变
-
-上游那个数字是 XAML 绑定：
-
-```xml
-<TextBlock Text="{Binding ElementName=DimmerSlider, Path=Value, StringFormat={}{0:P0}}" />
+```bash
+ProperDim.exe --demo     # 只演示界面，后端打桩，不改实际亮度
+ProperDim.exe --bench    # 性能实测，结果写到同目录 bench.txt
 ```
 
-它是滑块值的**直接绑定**，与亮度同步逻辑无关。我误把它实现成 `sync_brightness()` 里的一次 `set_text`，而那个函数有 500ms 用户交互防抖——拖动期间每帧都在刷新时间戳，防抖永远成立，于是**整个拖动过程数字都不动**。
+目标平台 `x86_64-pc-windows-msvc`。图标资源由 `build.rs` 直接生成 `.res` 交给链接器，不依赖 Windows SDK 的 `rc.exe`。
 
-修法：在滑块的 `Value` 事件里直接更新数字（QuickDim 的百分比同理），防抖只用于「别处改亮度时回写滑块」。
+## 实现说明
 
-### 拖动发涩
+| Rust 文件 | 对应上游 | 内容 |
+|---|---|---|
+| `src/native.rs` | `NativeMethods.cs` | 全部 Win32 常量 / 结构体 / DllImport，含结构体布局断言 |
+| `src/theme.rs` | `App.xaml` + 各 ControlTemplate | 暗色主题、双缓冲 GDI、圆角窗口、自绘控件、GDI+ 抗锯齿 |
+| `src/config.rs` | `ConfigManager.cs` | 26 个配置字段、手写 JSON（与 System.Text.Json 的格式一致） |
+| `src/backend.rs` | `HardwareGammaService.cs` | gamma LUT、watchdog、Magnification、显示器枚举、热键解析 |
+| `src/app.rs` | `App.xaml.cs` / `MainWindow.xaml.cs` | 托盘、亮度映射与动画、计划调度、会话/电源、崩溃恢复 |
+| `src/ui/*` | 各 `Window` / `ControlPanel` / 对话框 | 窗口框架、四个 Tab、QuickDim、四个对话框 |
+| `src/main.rs` | `App.OnStartup` | 单实例、DPI、消息循环 |
 
-高刷鼠标每秒发 1000 条 `WM_MOUSEMOVE`。`WM_PAINT` 和 `WM_TIMER` 一样是低优先级消息，队列被鼠标消息占满时**重绘会被饿死**，表现就是拖影、一顿一顿。三个措施：
+三个踩过的坑，写在这里免得后来者再踩：
 
-1. **拖动输入按 ~100Hz 合并**：捕获期间同一 10ms 内只处理一条移动消息，其余直接丢（`WindowCtx.drag_tick`）；松手时补处理最后一段，保证停在鼠标真实位置。
-2. **拖动期间不刷托盘 ToolTip**：每次 `Shell_NotifyIcon(NIM_MODIFY)` 实测 0.2–2.4ms，拖动时毫无意义；松手时补一次。
-3. 上一轮的 gamma 工作线程已经让硬件写入不再阻塞 UI。
+1. **`SetDeviceGammaRamp` 单次阻塞约 11ms**（驱动在等垂直同步）。放在 UI 线程上会直接吃掉 16ms 的帧预算，所以 gamma 写入走专用工作线程，UI 只投递「目标值」，并且只保留最新值（合并槽）。
+2. **`WM_TIMER` 会被系统合并**——队列里还有别的消息时，两拍只给一拍。拿它当动画帧时钟，帧间隔会稳定地变成 16/31ms 交替。改成由消息循环按截止时间驱动（`MsgWaitForMultipleObjectsEx` 超时 + 到期 tick）。
+3. **高刷鼠标的 `WM_MOUSEMOVE` 会把 `WM_PAINT` 饿死**（后者的消息优先级更低），拖动时表现为拖影、一顿一顿。按 ~100Hz 合并拖动输入后重绘才跟得上。
 
-### Cool 返回时主窗口闪一下
+## 与上游的差异
 
-两个原因、两处修正：
+功能与交互按上游逐行对齐，包括那些容易漏掉的细节：`CloseToTray=false` 真正退出、日程列表按「下次触发时间」排序、`ValidateTime` 的星期交集判定、预览隔离与 500ms 防抖、热键录制、窗口尺寸/位置持久化、崩溃时恢复屏幕亮度等。
 
-1. `ShowWindow` 到首次 `WM_PAINT` 之间，窗口表面是未绘制的——这就是那一帧「闪」。现在 `show_control_panel()` 先在**隐藏状态**下 `InvalidateRect(TRUE)` + `UpdateWindow()` 把内容画好，再 `ShowWindow`。
-2. 更根本的是：上游 `AppInfoWindow` 的 `Owner = ControlPanel` 且用 `ShowDialog()`，**面板从来不会被隐藏**，所以「返回」只是关掉子窗口。本版 Info 可以从 QuickDim/托盘菜单打开（面板是隐藏的），才产生了「重新显示面板」这个动作。现在 `show_info()` 会先把面板显示出来（对应 Owner 语义），返回时就没有窗口显示动作了。
+仍然存在的差异都属于**框架机制**层面，不影响功能：
 
-验证：`tools/probe_drag.py` 模拟 250Hz 拖动后比对截图——数字区变化 165 像素、整窗 1480 像素，确认数字与圆点都在跟随；`probe_info_click.py` 在返回瞬间连拍 6–8 帧，亮度值完全平稳（无异常亮/暗帧）。
-
-## 第九轮：点滑块出现的白框
-
-那圈白框是我自己加的**焦点框**：`mouse_down` 会把焦点交给被点的控件，绘制时用 `DrawFocusRect` 画了一圈——于是每次点/拖滑块都会留下一个白色方框。
-
-上游其实也画焦点框，但用的是 `App.xaml` 里的 `GrayFocusVisual`：
-
-```xml
-<Rectangle Margin="-2" StrokeThickness="1" Stroke="#888888" StrokeDashArray="1 2" />
-```
-
-1px、`#888888`、虚线、向外扩 2px；而且 **WPF 只在键盘聚焦时显示 `FocusVisualStyle`，鼠标点击不显示**（`KeyboardNavigation.ShowKeyboardCues`）。
-
-修法：
-- `Ui` 增加 `focus_visible`，只有 Tab 切焦点时置真，任何鼠标点击置假 → 鼠标操作不再有框。
-- 焦点框改画成上游样式（1px `#888888` 虚线、外扩 2px），替换掉 `DrawFocusRect` 的白色点线。
-- 顺手修掉 Tab 切换焦点后不重绘的问题（焦点框是画出来的，必须 `InvalidateRect`）。
-
-验证（`tools/probe_focus_ring.py`）：在同一位置连点两次滑块，两次截图**差异 0 像素**、滑块上下边框近白像素 **0**；再按 Tab，差异 78 像素，说明键盘焦点框仍在。
-
-## 剩余差异（诚实清单）
-
-1. **托盘右键仍是原生弹出菜单**（你指定的技术选型）：上游右键直接弹自定义 QuickDim 滑块窗口。把 `handle_tray_msg` 的右键分支改成 `toggle_tray_menu()` 即可 1:1。
-2. **WPF 特有的 GPU 观感机制无法逐行对应**：`DropShadowEffect`（像素着色器）、`VisualBrush` + `OpacityMask`（逐像素 alpha 裁剪）、`AllowsTransparency` 分层窗口、`ApplyThemeShadow` / `PrepareWindowForOS` / `ApplyWindows10Shadow`。圆角形状已用 `SetWindowRgn` 等价实现，阴影未复刻；点击/功能不受影响。
-3. **动画帧同步**：`CompositionTarget.Rendering` → 16ms `SetTimer`，仅顺滑度差异。
-4. **滚动条为近似实现**：用自绘 Slider 样式代替上游的完整 `ScrollBar` ControlTemplate，缺少 `ScrollViewerBehavior` 的平滑滚动动画与 `UpdateScheduleScrollFromMouse` 的精确拖动换算。
-5. **QuickDim 几何**：方位判定、溢出浮出窗口、12px 间距均已按上游视觉结果复刻，但本版窗口没有 WPF 的 28px 阴影边距，因此内部坐标是「视觉尺寸」而非「视觉+阴影」。
-6. **焦点细节**：Tab 顺序按控件创建顺序（WPF 按视觉树 + `FocusScope`）；`Dispatcher.BeginInvoke` 异步更新改为同步（单线程消息循环下等价）。
-7. **ResizeThumb**：上游锁定宽高比、只允许横向拖动并实时 `SetWindowPos`；本版用系统 `HTBOTTOMRIGHT` 自由拖拽，仅用 `WM_GETMINMAXINFO` 限制在 min/max 之间（高度不会自动按比例回算）。
-8. **ComboBox**：改值用原生弹出菜单，替代 WPF 下拉框与 `DropDownScrollViewer` 的 150ms 平滑滚动。
-9. **框架特有**：`DispatcherUnhandledException` 的 `COMException` 错误码白名单、`InvalidOperationException("UpdateToolTip")` 抑制、`NativeLogs.txt`（isNative 分支）、`App.OnStartup` 的 try/catch MessageBox，Rust 无对应概念。
-10. **未移植的死代码/无等价物**：`SetCursorPos`（上游未调用）、`MonitorsChanged`（无订阅者）、MSIX `StartupTask`（WinRT API）、`TrayMenuWindow.Window_Loaded`（空实现）。
-11. 原 `README.md` 里面向 AI 爬虫的诱导性 HTML 注释未移植（有意）。
-
-## 验证
-
-- `cargo build --release --offline` **零警告**；`cargo test --offline` **17 项全通过**（含 `DISPLAYCONFIG_PATH_INFO=72`、`MODE_INFO=80`、`TARGET_DEVICE_NAME=420`、`NOTIFYICONIDENTIFIER=40`、`RAMP=1536` 的 SDK 布局断言、热键解析、日期换算、JSON round-trip、读取原版 settings.json、亮度映射、滚轮 5%/1% 吸附、OEM 热键解析、**亮度动画必须收敛到目标**、GDI+ 抗锯齿可用、exe 图标资源可取、单帧绘制耗时预算）。
-- `--demo` 冒烟稳定、无崩溃；8 张界面回归截图由 `tools/capture_preview.py` 生成。
-
-## 构建说明
-
-- 目标 `x86_64-pc-windows-msvc`；本机 MSVC BuildTools 的 `link.exe` + Rust 自带导入库已验证可用（无需单独装 Windows SDK）。
-- **图标资源由 `build.rs` 生成**：把 `assets/app.ico` 编成 `.res`（手写 RES 格式，不依赖 `rc.exe`）并通过 `cargo:rustc-link-arg` 传给链接器；改了 ico 会自动重编。
-- `profile.release`：`opt-level = "z"` + LTO + `panic = "abort"` + strip。
-- `app.manifest` 未嵌入（运行时用 `SetProcessDpiAwarenessContext(-4)`）。如需嵌入：
-  `mt.exe -manifest app.manifest -outputresource:target\release\ProperDim.exe;1`
+1. **托盘右键默认是原生弹出菜单**，上游是自绘的 QuickDim 滑块窗口（Options 里可切换）
+2. **WPF 的 GPU 观感机制**无法逐行对应：`DropShadowEffect`、`VisualBrush` + `OpacityMask`、分层窗口透明度动画；圆角已用 `SetWindowRgn` 等价实现
+3. **滚动条为自绘近似**：缺少 `ScrollViewer` 的平滑滚动动画与像素级拖动换算
+4. **窗口拖拽**：上游锁定宽高比、只允许横向拖动；本版用系统边框自由拖拽，仅用 `WM_GETMINMAXINFO` 限制在 150% 以内
+5. **ComboBox** 用原生弹出菜单替代 WPF 下拉框
+6. **焦点顺序**按控件创建顺序（WPF 按视觉树 + `FocusScope`）
+7. 上游的死代码 / 无等价物未移植：`SetCursorPos`（从未调用）、`MonitorsChanged`（无订阅者）、MSIX `StartupTask`（WinRT）
 
 ## 许可
 
-沿用原项目 GPL-3.0-or-later。原作者 Kevin Stanislawski（crustyoldhuman）。
+沿用上游的 [GPL-3.0](LICENSE)。原作者 **Kevin Stanislawski**（[crustyoldhuman](https://github.com/crustyoldhuman)），本项目是基于其 [ProperDim](https://github.com/crustyoldhuman/ProperDim) 的二次开发。
+
+> 上游部分源文件头部另有 Apache-2.0 + Commons Clause 的声明，与仓库 LICENSE（GPL-3.0）不一致；本项目以 LICENSE 为准。

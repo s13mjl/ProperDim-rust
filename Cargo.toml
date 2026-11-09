@@ -2,8 +2,8 @@
 name = "properdim-rust"
 version = "1.4.6"
 edition = "2021"
-authors = ["Kevin Stanislawski (original C#), Rust port"]
-description = "1:1 Rust + pure Win32/GDI port of ProperDim (frontend-first)"
+authors = ["Kevin Stanislawski (original C#)", "s13mjl (Rust port)"]
+description = "Rust + pure Win32/GDI port of ProperDim — a Windows screen dimmer"
 license = "GPL-3.0-or-later"
 
 [[bin]]
