@@ -1,0 +1,18 @@
+[package]
+name = "properdim-rust"
+version = "1.4.6"
+edition = "2021"
+authors = ["Kevin Stanislawski (original C#), Rust port"]
+description = "1:1 Rust + pure Win32/GDI port of ProperDim (frontend-first)"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "ProperDim"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
