@@ -509,7 +509,10 @@ pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
     coffee.tag = "link".into();
     ctx.ui.widgets.push(coffee);
     ctx.ui.widgets.push(mk(ID_INFO_COOL, (w - 70) / 2, 322, 70, 25, Kind::Button("Cool".into())));
-    ctx.ui.widgets.push(mk(ID_INFO_HELP, w - 70, 34, 62, 16, Kind::Link("View help".into(), c::DIM)));
+    // 对应 XAML：HorizontalAlignment="Right" 且 TextDecorations="None"（唯一不带下划线的链接）
+    let mut help = mk(ID_INFO_HELP, w - 70, 34, 62, 16, Kind::Link("View help".into(), c::DIM));
+    help.tag = "right nounderline".into();
+    ctx.ui.widgets.push(help);
     ctx.ui.widgets.push(mk(999, w - 14, 380, 12, 12, Kind::ResizeGrip));
 }
 

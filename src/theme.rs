@@ -27,83 +27,142 @@ pub mod c {
     pub const DELETE_RED: COLORREF = rgb(0xFF, 0x55, 0x55);
     pub const PREVIEW_BLUE: COLORREF = rgb(0x57, 0x77, 0xA3);
     pub const HOVER: COLORREF = rgb(0x50, 0x50, 0x55);
+    /// 对应 XAML 滑块 Thumb：`Ellipse Fill="#B8B8B8" Stroke="#7E7E7E" StrokeThickness="2"`。
+    pub const THUMB: COLORREF = rgb(0xB8, 0xB8, 0xB8);
+    pub const THUMB_STROKE: COLORREF = rgb(0x7E, 0x7E, 0x7E);
 }
 
 // ---------------------------------------------------------------------------
 // 绘制工具
 // ---------------------------------------------------------------------------
 
-pub struct Painter {
-    pub dc: HDC,
+/// GDI 对象缓存。
+///
+/// 原来是「每次 WM_PAINT 新建 Painter → 重建 3 个字体 + 每控件一个画刷/画笔 + 新建后备位图」，
+/// 亮度动画 60fps 时每秒上千次 GDI 对象创建/销毁，是拖动与动画卡顿的主因。
+/// 这里把字体/画刷/画笔/后备缓冲全部按窗口线程缓存，尺寸变化时才重建。
+struct GdiCache {
     fonts: HashMap<i32, HFONT>,
-    pub scale: f64,
+    brushes: HashMap<u32, HBRUSH>,
+    pens: HashMap<(u32, i32), HPEN>,
+    back: Option<(HDC, HBITMAP, isize, i32, i32)>,
 }
-impl Painter {
-    pub fn new(dc: HDC, scale: f64) -> Self { Painter { dc, fonts: HashMap::new(), scale } }
-    pub fn px(&self, v: i32) -> i32 { (v as f64 * self.scale).round() as i32 }
-    fn font(&mut self, size: i32, weight: i32) -> HFONT {
-        let key = size * 1000 + weight;
-        if let Some(&f) = self.fonts.get(&key) { return f; }
+thread_local! {
+    static CACHE: std::cell::RefCell<GdiCache> = std::cell::RefCell::new(GdiCache {
+        fonts: HashMap::new(), brushes: HashMap::new(), pens: HashMap::new(), back: None,
+    });
+}
+
+fn cached_font(px: i32, weight: i32) -> HFONT {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = px * 1000 + weight;
+        if let Some(&f) = c.fonts.get(&key) { return f; }
         let face = wide("Segoe UI");
         let h = unsafe {
-            CreateFontW(-self.px(size), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
+            CreateFontW(-px.max(1), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | (FF_DONTCARE << 4), face.as_ptr())
         };
-        self.fonts.insert(key, h);
+        c.fonts.insert(key, h);
         h
-    }
-    pub fn fill(&self, r: RECT, color: COLORREF) {
-        unsafe {
-            let br = CreateSolidBrush(color);
-            FillRect(self.dc, &r, br);
-            DeleteObject(br);
+    })
+}
+
+fn cached_brush(color: COLORREF) -> HBRUSH {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = color as u32;
+        if let Some(&b) = c.brushes.get(&key) { return b; }
+        let b = unsafe { CreateSolidBrush(color) };
+        c.brushes.insert(key, b);
+        b
+    })
+}
+
+fn cached_pen(color: COLORREF, width: i32) -> HPEN {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = (color as u32, width);
+        if let Some(&p) = c.pens.get(&key) { return p; }
+        let p = unsafe { CreatePen(PS_SOLID, width.max(1), color) };
+        c.pens.insert(key, p);
+        p
+    })
+}
+
+/// 取（必要时重建）与窗口同尺寸的后备缓冲 DC。
+fn backbuffer(hdc: HDC, w: i32, h: i32) -> HDC {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let (w, h) = (w.max(1), h.max(1));
+        // 只增不减：多个不同尺寸的窗口共用一块够大的缓冲，避免每次切换窗口都重建 DIB。
+        // 只 BitBlt 左上角 w×h，缓冲多出来的部分永远不会被呈现。
+        if let Some((mem, _bmp, _old, bw, bh)) = c.back {
+            if bw >= w && bh >= h { return mem; }
+            unsafe {
+                SelectObject(mem, _old as HGDIOBJ);
+                DeleteObject(_bmp as HGDIOBJ);
+                DeleteDC(mem);
+            }
         }
+        let (nw, nh) = (w.max(
+            if let Some((_, _, _, bw, _)) = c.back { bw } else { 0 }), h.max(
+            if let Some((_, _, _, _, bh)) = c.back { bh } else { 0 }));
+        let mem = unsafe { CreateCompatibleDC(hdc) };
+        let bmp = unsafe { CreateCompatibleBitmap(hdc, nw, nh) };
+        let old = unsafe { SelectObject(mem, bmp as HGDIOBJ) } as isize;
+        c.back = Some((mem, bmp, old, nw, nh));
+        mem
+    })
+}
+
+pub struct Painter {
+    pub dc: HDC,
+    pub scale: f64,
+}
+impl Painter {
+    pub fn new(dc: HDC, scale: f64) -> Self { Painter { dc, scale } }
+    pub fn px(&self, v: i32) -> i32 { (v as f64 * self.scale).round() as i32 }
+    fn font(&self, size: i32, weight: i32) -> HFONT { cached_font(self.px(size), weight) }
+    pub fn fill(&self, r: RECT, color: COLORREF) {
+        unsafe { FillRect(self.dc, &r, cached_brush(color)); }
     }
     pub fn frame(&self, r: RECT, color: COLORREF) {
-        unsafe {
-            let br = CreateSolidBrush(color);
-            let rr = r.deflate(0);
-            frame_with_brush(self.dc, &rr, br);
-            DeleteObject(br);
-        }
+        frame_with_brush(self.dc, &r, cached_brush(color));
     }
     pub fn round(&self, r: RECT, radius: i32, fill: COLORREF, border: Option<COLORREF>) {
         unsafe {
-            let br = CreateSolidBrush(fill);
-            let pen = CreatePen(PS_SOLID, 1, border.unwrap_or(fill));
-            let old_br = SelectObject(self.dc, br);
-            let old_pen = SelectObject(self.dc, pen);
+            let br = cached_brush(fill);
+            let pen = cached_pen(border.unwrap_or(fill), 1);
+            let old_br = SelectObject(self.dc, br as HGDIOBJ);
+            let old_pen = SelectObject(self.dc, pen as HGDIOBJ);
             RoundRect(self.dc, r.left, r.top, r.right, r.bottom, self.px(radius * 2), self.px(radius * 2));
             SelectObject(self.dc, old_br);
             SelectObject(self.dc, old_pen);
-            DeleteObject(br);
-            DeleteObject(pen);
         }
     }
     pub fn rect(&self, r: RECT, fill: COLORREF) {
         unsafe {
-            let br = CreateSolidBrush(fill);
-            let old = SelectObject(self.dc, br);
+            let br = cached_brush(fill);
+            let old = SelectObject(self.dc, br as HGDIOBJ);
             Rectangle(self.dc, r.left, r.top, r.right, r.bottom);
             SelectObject(self.dc, old);
-            DeleteObject(br);
         }
     }
     pub fn line(&self, x1: i32, y1: i32, x2: i32, y2: i32, color: COLORREF, width: i32) {
         unsafe {
-            let pen = CreatePen(PS_SOLID, width.max(1), color);
-            let old = SelectObject(self.dc, pen);
+            let pen = cached_pen(color, width);
+            let old = SelectObject(self.dc, pen as HGDIOBJ);
             MoveToEx(self.dc, x1, y1, std::ptr::null_mut());
             LineTo(self.dc, x2, y2);
             SelectObject(self.dc, old);
-            DeleteObject(pen);
         }
     }
     pub fn text(&mut self, s: &str, r: RECT, color: COLORREF, size: i32, flags: u32) {
         unsafe {
             let f = self.font(size, FW_NORMAL);
-            let old = SelectObject(self.dc, f);
+            let old = SelectObject(self.dc, f as HGDIOBJ);
             SetBkMode(self.dc, TRANSPARENT);
             SetTextColor(self.dc, color);
             let w = wide(s);
@@ -115,7 +174,7 @@ impl Painter {
     pub fn text_bold(&mut self, s: &str, r: RECT, color: COLORREF, size: i32, flags: u32) {
         unsafe {
             let f = self.font(size, FW_MEDIUM);
-            let old = SelectObject(self.dc, f);
+            let old = SelectObject(self.dc, f as HGDIOBJ);
             SetBkMode(self.dc, TRANSPARENT);
             SetTextColor(self.dc, color);
             let w = wide(s);
@@ -127,18 +186,13 @@ impl Painter {
     pub fn text_width(&mut self, s: &str, size: i32) -> i32 {
         unsafe {
             let f = self.font(size, FW_NORMAL);
-            let old = SelectObject(self.dc, f);
+            let old = SelectObject(self.dc, f as HGDIOBJ);
             let w = wide(s);
             let mut sz = SIZE { cx: 0, cy: 0 };
             GetTextExtentPoint32W(self.dc, w.as_ptr(), (w.len() - 1) as i32, &mut sz);
             SelectObject(self.dc, old);
             sz.cx
         }
-    }
-}
-impl Drop for Painter {
-    fn drop(&mut self) {
-        unsafe { for (_, f) in self.fonts.drain() { DeleteObject(f); } }
     }
 }
 
@@ -476,8 +530,10 @@ fn draw_widget(p: &mut Painter, w: &Widget) {
                 p.round(track, 2, c::TRACK, None);
                 let cy = track.bottom - (t.clamp(0.0, 1.0) * track.height() as f64).round() as i32;
                 let d = p.px(18);
-                let thumb_color = if w.hover || w.enabled { c::LIGHT } else { c::DIM };
-                p.round(RECT::new(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2), 9, thumb_color, Some(c::BORDER));
+                let fill = if dim { c::DIM } else { c::THUMB };
+                if !gp::fill_circle(p.dc, cx, cy, d, fill, Some((c::THUMB_STROKE, p.px(2)))) {
+                    p.round(RECT::new(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2), d / 2, fill, Some(c::THUMB_STROKE));
+                }
             } else {
                 let cy = (r.top + r.bottom) / 2;
                 let th = p.px(6);
@@ -485,8 +541,11 @@ fn draw_widget(p: &mut Painter, w: &Widget) {
                 p.round(track, 3, c::TRACK, None);
                 let cx = track.left + (t.clamp(0.0, 1.0) * track.width() as f64).round() as i32;
                 let d = p.px(18);
-                let thumb_color = if dim { c::DIM } else if w.hover { c::WHITE } else { c::LIGHT };
-                p.round(RECT::new(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2), 9, thumb_color, Some(c::BORDER));
+                let fill = if dim { c::DIM } else { c::THUMB };
+                // 上游是 Ellipse（矢量圆），GDI 的 RoundRect 会有锯齿 → 用 GDI+ 抗锯齿绘制
+                if !gp::fill_circle(p.dc, cx, cy, d, fill, Some((c::THUMB_STROKE, p.px(2)))) {
+                    p.round(RECT::new(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2), d / 2, fill, Some(c::THUMB_STROKE));
+                }
             }
         }
         Kind::Tab(s, active) => {
@@ -497,10 +556,17 @@ fn draw_widget(p: &mut Painter, w: &Widget) {
         }
         Kind::Link(s, color) => {
             let col = if w.hover { c::LINK_HOVER } else { *color };
-            p.text(s, r, col, 11, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            let tw = p.text_width(s, 11).min(r.width());
-            let y = (r.top + r.bottom) / 2 + p.px(7);
-            p.line(r.left, y, r.left + tw, y, col, 1);
+            let right = w.tag.contains("right");
+            // 上游这些链接都在 HorizontalAlignment=Center 的 TextBlock 里：
+            // 文字必须居中，不能按控件左边界左对齐（否则整体偏左）
+            let flags = if right { DT_RIGHT } else { DT_CENTER };
+            p.text(s, r, col, 11, flags | DT_VCENTER | DT_SINGLELINE);
+            if !w.tag.contains("nounderline") {
+                let tw = p.text_width(s, 11).min(r.width());
+                let x0 = if right { r.right - tw } else { r.left + (r.width() - tw) / 2 };
+                let y = (r.top + r.bottom) / 2 + p.px(7);
+                p.line(x0, y, x0 + tw, y, col, 1);
+            }
         }
         Kind::TextBox(s) | Kind::Combo(s) => {
             p.round(RECT::new(r.left, r.top, r.right - 1, r.bottom - 1), 2, c::PANEL, Some(c::BORDER));
@@ -535,16 +601,16 @@ fn draw_widget(p: &mut Painter, w: &Widget) {
 }
 
 /// 双缓冲绘制入口：对应 WPF 的 composition / 离屏渲染。
-pub fn paint_window(hwnd: HWND, ui: &Ui, bg: COLORREF, title: Option<(RECT, &str)>, icon: HICON, scale: f64) {
+pub fn paint_window(hwnd: HWND, ui: &Ui, bg: COLORREF, title: Option<(RECT, &str)>,
+                    icon: HICON, icon_large: HICON, scale: f64) {
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
         if hdc == NULL { return; }
         let mut cr = RECT::default();
         GetClientRect(hwnd, &mut cr);
-        let mem = CreateCompatibleDC(hdc);
-        let bmp = CreateCompatibleBitmap(hdc, cr.width().max(1), cr.height().max(1));
-        let old_bmp = SelectObject(mem, bmp);
+        // 复用后备缓冲（尺寸不变时不再每次分配 DIB）
+        let mem = backbuffer(hdc, cr.width(), cr.height());
 
         {
             let mut p = Painter::new(mem, scale);
@@ -567,8 +633,9 @@ pub fn paint_window(hwnd: HWND, ui: &Ui, bg: COLORREF, title: Option<(RECT, &str
             for wi in &ui.widgets {
                 if !wi.visible { continue; }
                 if let Kind::IconBox = wi.kind {
-                    if icon != NULL {
-                        DrawIconEx(mem, wi.rect.left, wi.rect.top, icon,
+                    let big = if icon_large != NULL { icon_large } else { icon };
+                    if big != NULL {
+                        DrawIconEx(mem, wi.rect.left, wi.rect.top, big,
                             wi.rect.width(), wi.rect.height(), 0, 0, 0x0003);
                     }
                 }
@@ -576,9 +643,6 @@ pub fn paint_window(hwnd: HWND, ui: &Ui, bg: COLORREF, title: Option<(RECT, &str
         }
 
         BitBlt(hdc, 0, 0, cr.width(), cr.height(), mem, 0, 0, SRCCOPY);
-        SelectObject(mem, old_bmp);
-        DeleteObject(bmp);
-        DeleteDC(mem);
         EndPaint(hwnd, &ps);
     }
 }
@@ -590,9 +654,184 @@ pub fn apply_round_region(hwnd: HWND, w: i32, h: i32, radius: i32) {
     }
 }
 
+/// GDI+ 动态封装：只用于画抗锯齿圆（对应 WPF 的 `Ellipse`）。
+/// 本机没有 Windows SDK 的 `gdiplus.lib`，所以全部走 `LoadLibrary` + `GetProcAddress`，
+/// 失败时调用方退回 GDI 的 `RoundRect`，不影响功能。
+pub mod gp {
+    use crate::native::*;
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    struct StartupInput {
+        version: u32,
+        callback: *const std::ffi::c_void,
+        suppress_bg: i32,
+        suppress_codecs: i32,
+    }
+
+    type FnStartup = unsafe extern "system" fn(*mut usize, *const StartupInput, *mut std::ffi::c_void) -> i32;
+    type FnCreateFromHdc = unsafe extern "system" fn(HDC, *mut *mut std::ffi::c_void) -> i32;
+    type FnSetSmoothing = unsafe extern "system" fn(*mut std::ffi::c_void, i32) -> i32;
+    type FnSolidFill = unsafe extern "system" fn(u32, *mut *mut std::ffi::c_void) -> i32;
+    type FnPen1 = unsafe extern "system" fn(u32, f32, i32, *mut *mut std::ffi::c_void) -> i32;
+    type FnEllipse = unsafe extern "system" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, f32, f32, f32, f32) -> i32;
+    type FnDelete = unsafe extern "system" fn(*mut std::ffi::c_void) -> i32;
+
+    struct Apis {
+        create_from_hdc: FnCreateFromHdc,
+        set_smoothing: FnSetSmoothing,
+        solid_fill: FnSolidFill,
+        pen1: FnPen1,
+        fill_ellipse: FnEllipse,
+        draw_ellipse: FnEllipse,
+        delete_brush: FnDelete,
+        delete_pen: FnDelete,
+        delete_graphics: FnDelete,
+    }
+
+    static APIS: OnceLock<Option<Apis>> = OnceLock::new();
+
+    /// COLORREF(0x00BBGGRR) → GDI+ ARGB(0xAARRGGBB)
+    fn argb(c: COLORREF) -> u32 {
+        0xFF00_0000 | ((c & 0xFF) << 16) | (c & 0x00FF_00) | ((c >> 16) & 0xFF)
+    }
+
+    fn load() -> Option<Apis> {
+        unsafe {
+            let lib = wide("gdiplus.dll");
+            let h = LoadLibraryW(lib.as_ptr());
+            if h == 0 { return None; }
+            unsafe fn sym(h: HMODULE, name: &str) -> *const std::ffi::c_void {
+                let mut v = name.as_bytes().to_vec();
+                v.push(0);
+                GetProcAddress(h, v.as_ptr())
+            }
+            macro_rules! sym_as {
+                ($name:literal, $t:ty) => {{
+                    let p = sym(h, $name);
+                    if p.is_null() { return None; }
+                    std::mem::transmute::<*const std::ffi::c_void, $t>(p)
+                }};
+            }
+            let startup = sym_as!("GdiplusStartup", FnStartup);
+            let create_from_hdc = sym_as!("GdipCreateFromHDC", FnCreateFromHdc);
+            let set_smoothing = sym_as!("GdipSetSmoothingMode", FnSetSmoothing);
+            let solid_fill = sym_as!("GdipCreateSolidFill", FnSolidFill);
+            let pen1 = sym_as!("GdipCreatePen1", FnPen1);
+            let fill_ellipse = sym_as!("GdipFillEllipse", FnEllipse);
+            let draw_ellipse = sym_as!("GdipDrawEllipse", FnEllipse);
+            let delete_brush = sym_as!("GdipDeleteBrush", FnDelete);
+            let delete_pen = sym_as!("GdipDeletePen", FnDelete);
+            let delete_graphics = sym_as!("GdipDeleteGraphics", FnDelete);
+
+            let mut token: usize = 0;
+            let input = StartupInput {
+                version: 1, callback: std::ptr::null(), suppress_bg: 0, suppress_codecs: 0,
+            };
+            if startup(&mut token, &input, std::ptr::null_mut()) != 0 { return None; }
+
+            Some(Apis {
+                create_from_hdc, set_smoothing, solid_fill, pen1,
+                fill_ellipse, draw_ellipse, delete_brush, delete_pen, delete_graphics,
+            })
+        }
+    }
+
+    fn apis() -> Option<&'static Apis> { APIS.get_or_init(load).as_ref() }
+
+    /// 画一个抗锯齿圆（可选描边）。返回 false 表示 GDI+ 不可用，调用方需自行回退。
+    pub fn fill_circle(dc: HDC, cx: i32, cy: i32, d: i32,
+                       fill: COLORREF, stroke: Option<(COLORREF, i32)>) -> bool {
+        if d <= 0 { return false; }
+        let Some(a) = apis() else { return false; };
+        // 描边居中落在路径上：内缩半个笔宽，保证整体不超出 d×d
+        let inset = stroke.map(|(_, w)| (w.max(1) / 2) as f32).unwrap_or(0.0);
+        let x = cx as f32 - d as f32 / 2.0 + inset;
+        let y = cy as f32 - d as f32 / 2.0 + inset;
+        let s = d as f32 - inset * 2.0;
+        unsafe {
+            let mut g: *mut std::ffi::c_void = std::ptr::null_mut();
+            if (a.create_from_hdc)(dc, &mut g) != 0 || g.is_null() { return false; }
+            (a.set_smoothing)(g, 4); // SmoothingModeAntiAlias
+            let mut br: *mut std::ffi::c_void = std::ptr::null_mut();
+            if (a.solid_fill)(argb(fill), &mut br) == 0 && !br.is_null() {
+                (a.fill_ellipse)(g, br, x, y, s, s);
+                (a.delete_brush)(br);
+            }
+            if let Some((col, w)) = stroke {
+                let mut pen: *mut std::ffi::c_void = std::ptr::null_mut();
+                if (a.pen1)(argb(col), w.max(1) as f32, 2 /* UnitPixel */, &mut pen) == 0 && !pen.is_null() {
+                    (a.draw_ellipse)(g, pen, x, y, s, s);
+                    (a.delete_pen)(pen);
+                }
+            }
+            (a.delete_graphics)(g);
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 亮度动画每 16ms 重绘一次；绘制路径必须是「查缓存 + 画」，不能每次重建 GDI 对象。
+    /// 这里用真实窗口尺寸 + 近似控件数量做绝对上限回归（原来每次重绘要新建字体/画刷/位图）。
+    #[test]
+    fn repaint_is_cheap_enough_for_60fps() {
+        unsafe {
+            let dc = CreateCompatibleDC(NULL);
+            let bmp = CreateCompatibleBitmap(dc, 525, 300);
+            let old = SelectObject(dc, bmp as HGDIOBJ);
+
+            let mut ui = Ui::new();
+            let mut y = 0;
+            while y < 260 {
+                ui.widgets.push(Widget::new(1000 + y as u32, RECT::new(10, y, 200, y + 18),
+                    Kind::Label("Brightness Level: ".into(), 14, c::WHITE)));
+                ui.widgets.push(Widget::new(2000 + y as u32, RECT::new(210, y, 500, y + 18),
+                    Kind::Button("20%".into())));
+                y += 20;
+            }
+            ui.widgets.push(Widget::new(1, RECT::new(20, 82, 505, 102),
+                Kind::Slider { min: 0.01, max: 1.0, value: 0.62, vertical: false }));
+            ui.widgets.push(Widget::new(2, RECT::new(100, 130, 300, 148),
+                Kind::Link("Adjust Minimum".into(), c::MUTED)));
+
+            let frames = 200;
+            let t0 = GetTickCount64();
+            for _ in 0..frames {
+                let mut p = Painter::new(dc, 1.0);
+                p.fill(RECT::new(0, 0, 525, 300), c::BG);
+                ui.draw(&mut p);
+            }
+            let total = GetTickCount64() - t0;
+            let per = total as f64 / frames as f64;
+
+            SelectObject(dc, old);
+            DeleteObject(bmp as HGDIOBJ);
+            DeleteDC(dc);
+
+            // 16ms 一帧的预算里，绘制应占用很小一部分；超过 4ms 说明又退回了逐对象创建
+            assert!(per < 4.0, "单帧绘制 {:.2}ms，超过 4ms 预算（{} 帧共 {}ms）", per, frames, total);
+        }
+    }
+
+    #[test]
+    fn thumb_uses_antialiased_gdiplus() {
+        // 圆点必须能走 GDI+ 抗锯齿路径（失败会回退成锯齿的 RoundRect）
+        unsafe {
+            let dc = CreateCompatibleDC(NULL);
+            let bmp = CreateCompatibleBitmap(dc, 32, 32);
+            let old = SelectObject(dc, bmp as HGDIOBJ);
+            let ok = gp::fill_circle(dc, 16, 16, 18, c::THUMB, Some((c::THUMB_STROKE, 2)));
+            SelectObject(dc, old);
+            DeleteObject(bmp as HGDIOBJ);
+            DeleteDC(dc);
+            assert!(ok, "GDI+ 未加载，圆点会退回带锯齿的 GDI 实现");
+        }
+    }
+
 
     fn slider(min: f64, max: f64, value: f64, tag: &str) -> Ui {
         let mut ui = Ui::new();

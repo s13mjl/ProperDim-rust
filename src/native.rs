@@ -42,6 +42,9 @@ pub const WM_PAINT: UINT = 0x000F;
 pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_ERASEBKGND: UINT = 0x0014;
 pub const WM_SETTINGCHANGE: UINT = 0x001A;
+pub const WM_SETICON: UINT = 0x0080;
+pub const ICON_SMALL: usize = 0;
+pub const ICON_BIG: usize = 1;
 pub const WM_FONTCHANGE: UINT = 0x001D;
 pub const WM_KEYDOWN: UINT = 0x0100;
 pub const WM_KEYUP: UINT = 0x0101;
@@ -648,12 +651,15 @@ extern "system" {
 #[link(name = "shell32")]
 extern "system" {
     pub fn Shell_NotifyIconGetRect(id: *const NOTIFYICONIDENTIFIER, rect: *mut RECT) -> i32;
+    pub fn ExtractIconExW(szFileName: *const u16, nIconIndex: i32,
+                         phiconLarge: *mut isize, phiconSmall: *mut isize, nIcons: u32) -> u32;
 }
 
 // ---- 动态加载：这些库没有稳定导入库可用 ----
 pub type FnDwmSetWindowAttribute = unsafe extern "system" fn(HWND, i32, *const c_void, u32) -> i32;
 pub type FnGetDpiForMonitor = unsafe extern "system" fn(HWND, i32, *mut u32, *mut u32) -> i32;
 pub type FnWtsRegister = unsafe extern "system" fn(HWND, u32) -> BOOL;
+pub type FnTimePeriod = unsafe extern "system" fn(u32) -> u32;
 pub type FnWtsUnregister = unsafe extern "system" fn(HWND) -> BOOL;
 pub type FnGetCurrentPackageFullName = unsafe extern "system" fn(*mut u32, *mut u16) -> i32;
 
@@ -663,6 +669,9 @@ pub struct ExtraApis {
     pub wts_register: Option<FnWtsRegister>,
     pub wts_unregister: Option<FnWtsUnregister>,
     pub package_full_name: Option<FnGetCurrentPackageFullName>,
+    /// winmm 的 timeBeginPeriod / timeEndPeriod：提高系统时钟粒度，让 16ms 动画定时器稳定。
+    pub time_begin: Option<FnTimePeriod>,
+    pub time_end: Option<FnTimePeriod>,
 }
 impl ExtraApis {
     pub fn load() -> Self {
@@ -679,8 +688,10 @@ impl ExtraApis {
             let shcore = get("shcore.dll");
             let wts = get("wtsapi32.dll");
             let k32 = get("kernel32.dll");
+            let winmm = get("winmm.dll");
             let mut out = ExtraApis { dwm_set: None, dpi_for_monitor: None,
-                wts_register: None, wts_unregister: None, package_full_name: None };
+                wts_register: None, wts_unregister: None, package_full_name: None,
+                time_begin: None, time_end: None };
             let p = proc(dwm, b"DwmSetWindowAttribute");
             if !p.is_null() { out.dwm_set = Some(std::mem::transmute::<*const c_void, FnDwmSetWindowAttribute>(p)); }
             let p = proc(shcore, b"GetDpiForMonitor");
@@ -691,6 +702,10 @@ impl ExtraApis {
             if !p.is_null() { out.wts_unregister = Some(std::mem::transmute::<*const c_void, FnWtsUnregister>(p)); }
             let p = proc(k32, b"GetCurrentPackageFullName");
             if !p.is_null() { out.package_full_name = Some(std::mem::transmute::<*const c_void, FnGetCurrentPackageFullName>(p)); }
+            let p = proc(winmm, b"timeBeginPeriod");
+            if !p.is_null() { out.time_begin = Some(std::mem::transmute::<*const c_void, FnTimePeriod>(p)); }
+            let p = proc(winmm, b"timeEndPeriod");
+            if !p.is_null() { out.time_end = Some(std::mem::transmute::<*const c_void, FnTimePeriod>(p)); }
             out
         }
     }

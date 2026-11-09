@@ -8,12 +8,13 @@
 > 第三轮：按上游 **198 个方法 / 64 个 XAML 事件绑定** 逐项核对，补齐交互逻辑与文案，并修正前两轮 README 中过满的「已 1:1」表述。
 > 第四轮：逐段读方法体，补齐数据格式、事件订阅、模态窗口、启动自修复、崩溃恢复、滚轮步进等剩余行为差异。
 > 第五轮：**真正逐行通读上游全部 14 个 `.cs`（5246 行）与 Rust 全部 9 个 `.rs`**，逐语句对照——抓到了前四轮「按方法名/清单抽样」结构性漏掉的一批 bug，包括**亮度动画实际只走第一帧**、**日程列表滚动完全失效**、**AM/PM 单选按钮无效**。
+> 第六轮：修用户实测反馈的四个问题——亮度调节卡顿、滑块圆点锯齿、链接文字偏左、exe 没有图标。
 
 ## 快速开始
 
 ```bash
 cargo build --release --offline          # 零依赖，无需联网
-cargo test --offline                     # 14 个单元测试
+cargo test --offline                     # 17 个单元测试
 target/release/ProperDim.exe             # 正常运行（会真正调节屏幕亮度）
 target/release/ProperDim.exe --demo      # 只演示界面，后端打桩、不改屏幕亮度
 target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步亮度复位
@@ -27,11 +28,11 @@ target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步�
 
 | 指标 | 原 C# / WPF 版 | Rust 版（demo，含控制面板窗口） |
 |---|---|---|
-| 进程工作集 | ~90 MB | **13,220 KB ≈ 12.9 MB** |
-| 可执行文件 | 64.1 MB（Portable 自包含单文件） | **278 KB** |
+| 进程工作集 | ~90 MB | **14,124 KB ≈ 13.8 MB** |
+| 可执行文件 | 64.1 MB（Portable 自包含单文件） | **825 KB**（其中约 500 KB 是 7 个尺寸的图标资源） |
 | 外部依赖 | .NET 10 Desktop Runtime + 3 个 NuGet 包 | 无（仅系统 DLL） |
 
-最终构建 `tasklist` 实测输出：`"ProperDim.exe","41696","Console","1","13,220 K"`。
+最终构建 `tasklist` 实测输出：`"ProperDim.exe","29140","Console","1","14,124 K"`。
 进程正常运行、无崩溃；界面预览见 `preview/frontend.png` 与 `preview/dialogs.png`。
 
 ## 目录与映射
@@ -143,6 +144,17 @@ target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步�
 
 另外**删掉**一处我上一轮自己加的、上游根本没有的行为：`Delete` 键删除日程（`ScheduleList_PreviewKeyDown` 只处理 Enter/Space）。
 
+## 第六轮：用户实测反馈的四个问题
+
+| 问题 | 根因 | 修法 |
+|---|---|---|
+| **调节亮度一卡一卡** | 渲染路径每帧重建全部 GDI 对象：`Painter` 每次 `WM_PAINT` 新建 3 个字体、每个控件新建/销毁画刷与画笔，并 `CreateCompatibleBitmap` 分配一整块 DIB；`HardwareGammaService` 每帧 `CreateDC`/`DeleteDC`；另外 16ms 的 `SetTimer` 撞上 Windows 默认 15.6ms 时钟粒度，帧间隔忽长忽短；每个 `WM_MOUSEMOVE`（高刷鼠标 1000Hz）都整窗重绘 | ① 字体/画刷/画笔按 (尺寸,颜色) 缓存；② 后备缓冲改为「只增不减」的常驻 DIB，不再每帧分配；③ 显示器 DC 缓存，只在显示拓扑变化时释放；④ `timeBeginPeriod(1)` 提高时钟粒度；⑤ 鼠标移动后状态（hover/capture/滑块值）没变就不重绘 |
+| **滑块圆点有锯齿** | 圆点是 `RoundRect` + 纯色画刷，GDI 没有抗锯齿；上游是矢量 `Ellipse` | 用 GDI+（`GdiplusStartup` + `GdipFillEllipse`/`GdipDrawEllipse`，`SmoothingModeAntiAlias`）绘制；动态 `LoadLibrary`，取不到就回退 GDI。配色也对齐 XAML：填充 `#B8B8B8`、描边 `#7E7E7E` 2px |
+| **下划线蓝字偏左** | 链接文字用 `DT_LEFT` 画在一个居中的宽控件框里，文字从框左边界起排 | 改为 `DT_CENTER`（上游这些链接都在 `HorizontalAlignment="Center"` 的 `TextBlock` 里），下划线起点同步按文字宽居中；顺带修正 `View help`：上游是 `HorizontalAlignment="Right"` + `TextDecorations="None"`，本版原来既左对齐又多画了下划线 |
+| **exe 没有图标** | 从没生成过 Win32 资源；本机没装 Windows SDK 的 `rc.exe` | 新增 `build.rs`：直接手写 `.res`（RT_ICON + RT_GROUP_ICON），用 `cargo:rustc-link-arg` 交给 `link.exe`；图标取上游完整 8 尺寸 ico（去重后 7 个，含 256×256 PNG）。同时窗口补 `WM_SETICON`，Info 窗口的 65px 大图改用资源里的 64px 帧（原来是 16px 放大，糊） |
+
+新增回归测试：`thumb_uses_antialiased_gdiplus`（GDI+ 必须可用）、`icon_resource_embedded`（`LoadImage` + 资源管理器同款 `ExtractIconExW` 都能取到图标）、`repaint_is_cheap_enough_for_60fps`（单帧绘制预算 4ms，防止又退回逐对象创建）。
+
 ## 剩余差异（诚实清单）
 
 1. **托盘右键仍是原生弹出菜单**（你指定的技术选型）：上游右键直接弹自定义 QuickDim 滑块窗口。把 `handle_tray_msg` 的右键分支改成 `toggle_tray_menu()` 即可 1:1。
@@ -159,12 +171,13 @@ target/release/ProperDim.exe --reset     # 对应 Inno Setup 卸载器的同步�
 
 ## 验证
 
-- `cargo build --release --offline` **零警告**；`cargo test --offline` **14 项全通过**（含 `DISPLAYCONFIG_PATH_INFO=72`、`MODE_INFO=80`、`TARGET_DEVICE_NAME=420`、`NOTIFYICONIDENTIFIER=40`、`RAMP=1536` 的 SDK 布局断言、热键解析、日期换算、JSON round-trip、读取原版 settings.json、亮度映射、滚轮 5%/1% 吸附、OEM 热键解析、**亮度动画必须收敛到目标**）。
+- `cargo build --release --offline` **零警告**；`cargo test --offline` **17 项全通过**（含 `DISPLAYCONFIG_PATH_INFO=72`、`MODE_INFO=80`、`TARGET_DEVICE_NAME=420`、`NOTIFYICONIDENTIFIER=40`、`RAMP=1536` 的 SDK 布局断言、热键解析、日期换算、JSON round-trip、读取原版 settings.json、亮度映射、滚轮 5%/1% 吸附、OEM 热键解析、**亮度动画必须收敛到目标**、GDI+ 抗锯齿可用、exe 图标资源可取、单帧绘制耗时预算）。
 - `--demo` 冒烟稳定、无崩溃；8 张界面回归截图由 `tools/capture_preview.py` 生成。
 
 ## 构建说明
 
 - 目标 `x86_64-pc-windows-msvc`；本机 MSVC BuildTools 的 `link.exe` + Rust 自带导入库已验证可用（无需单独装 Windows SDK）。
+- **图标资源由 `build.rs` 生成**：把 `assets/app.ico` 编成 `.res`（手写 RES 格式，不依赖 `rc.exe`）并通过 `cargo:rustc-link-arg` 传给链接器；改了 ico 会自动重编。
 - `profile.release`：`opt-level = "z"` + LTO + `panic = "abort"` + strip。
 - `app.manifest` 未嵌入（运行时用 `SetProcessDpiAwarenessContext(-4)`）。如需嵌入：
   `mt.exe -manifest app.manifest -outputresource:target\release\ProperDim.exe;1`

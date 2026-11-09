@@ -52,19 +52,23 @@ fn main() {
 
     // 3. DPI（对应 app.manifest 的 PerMonitorV2）
     unsafe { SetProcessDpiAwarenessContext(-4isize); }
+
     app::ensure_readme();
 
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let icon = app::make_icon();
+    // 此时还不知道 DPI，先占位；算出 scale 后再按物理像素加载真正的图标
+    let icon = NULL;
     let extra_apis = ExtraApis::load();
     config::set_msix(extra_apis.is_msix());
+    // 亮度动画用 16ms 定时器；默认 15.6ms 的时钟粒度会让帧间隔忽长忽短（观感一卡一卡）
+    if let Some(f) = extra_apis.time_begin { unsafe { f(1); } }
 
     // 4. 控制器窗口（对应隐藏的 MainWindow / TaskbarIcon 宿主）
     let cls = {
         let mut app_stub = App {
             settings: config::load(),
             backend: backend::create_backend(demo),
-            demo, icon, scale: 1.0, instance,
+            demo, icon, icon_large: NULL, scale: 1.0, instance,
             hwnd_controller: NULL, hwnd_panel: NULL, hwnd_tray_menu: NULL,
             hwnd_schedule: NULL, hwnd_min: NULL, hwnd_info: NULL, hwnd_warning: NULL,
             current_brightness: 1.0, last_hardware: 1.0, locked_hardware: 1.0,
@@ -103,7 +107,11 @@ fn main() {
         let a = app::app();
         a.hwnd_controller = controller;
         a.scale = scale;
+        // 按实际 DPI 取对应尺寸的图标资源（16px 给托盘/标题栏，64px 给 Info 窗口大图）
+        a.icon = app::load_icon(ui::s(16));
+        a.icon_large = app::load_icon(ui::s(64));
     }
+    let icon = app::app().icon;
 
     // 对应 ControlPanel.Window_Loaded 的 SELF-REPAIR：确保注册表自启动项指向当前 exe
     if !app::app().extra.is_msix() {
@@ -145,6 +153,7 @@ fn main() {
 
     app::unregister_session_notification(controller);
     app::remove_mouse_hook();
+    if let Some(f) = app::app().extra.time_end { unsafe { f(1); } }
     app::shutdown_app();
 }
 

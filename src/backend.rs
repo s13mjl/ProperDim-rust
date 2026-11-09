@@ -37,6 +37,9 @@ pub trait Backend {
 // ---------------------------------------------------------------------------
 pub struct Win32Backend {
     targets: HashMap<String, f64>,
+    /// 每个显示器的 GDI DC 缓存。原来每帧 CreateDC/DeleteDC 一次，
+    /// 亮度动画 60fps × 多显示器时是拖动卡顿的另一大来源。
+    dcs: HashMap<String, HDC>,
     applied: HashMap<String, f64>,
     ramp: RAMP,
     mag: Magnification,
@@ -58,7 +61,7 @@ impl Win32Backend {
     pub fn new() -> Self {
         let mag = Magnification::load();
         let mut b = Win32Backend {
-            targets: HashMap::new(), applied: HashMap::new(), ramp: RAMP::default(),
+            targets: HashMap::new(), dcs: HashMap::new(), applied: HashMap::new(), ramp: RAMP::default(),
             mag, mag_ready: false, current_mag_factor: 1.0,
             monitors: Vec::new(), hotkey_hwnd: NULL,
         };
@@ -78,6 +81,21 @@ impl Win32Backend {
         }
     }
 
+    /// 取（必要时创建并缓存）显示器 DC。
+    fn dc(&mut self, device: &str) -> HDC {
+        if let Some(&d) = self.dcs.get(device) { return d; }
+        let name = wide(device);
+        let d = unsafe { CreateDCW(std::ptr::null(), name.as_ptr(), std::ptr::null(), std::ptr::null()) };
+        if d != NULL { self.dcs.insert(device.to_string(), d); }
+        d
+    }
+
+    fn free_dcs(&mut self) {
+        for (_, d) in self.dcs.drain() {
+            if d != NULL { unsafe { DeleteDC(d); } }
+        }
+    }
+
     /// 对应 `HardwareGammaService.ApplyGamma()`。
     fn apply_gamma(&mut self, device: &str, target: f64, force: bool) {
         let hardware = target.clamp(0.5, 1.0);
@@ -86,17 +104,15 @@ impl Win32Backend {
                 if (hardware - last).abs() < 0.001 { return; }
             }
         }
+        let dc = self.dc(device);
+        if dc == NULL { return; }
         unsafe {
-            let name = wide(device);
-            let dc = CreateDCW(std::ptr::null(), name.as_ptr(), std::ptr::null(), std::ptr::null());
-            if dc == NULL { return; }
             if force {
                 let mut cur = RAMP::default();
                 if GetDeviceGammaRamp(dc, &mut cur) != 0 {
                     let expected = (hardware * 65535.0) as u16;
                     if ((cur.red[255] as i32) - (expected as i32)).abs() < 256 {
                         self.applied.insert(device.to_string(), hardware);
-                        DeleteDC(dc);
                         return;
                     }
                 }
@@ -108,7 +124,6 @@ impl Win32Backend {
             if SetDeviceGammaRamp(dc, &self.ramp) != 0 {
                 self.applied.insert(device.to_string(), hardware);
             }
-            DeleteDC(dc);
         }
     }
 
@@ -368,6 +383,8 @@ impl Backend for Win32Backend {
         self.set_magnification(hardware);
     }
     fn refresh_monitors(&mut self) -> Vec<MonitorInfo> {
+        // 显示拓扑可能已变，缓存的 DC 不能再用
+        self.free_dcs();
         let mut ctx = EnumCtx { out: Vec::new(), cfg: DisplayConfig::query() };
         unsafe {
             EnumDisplayMonitors(NULL, std::ptr::null(), Some(enum_monitor_proc), &mut ctx as *mut _ as LPARAM);
@@ -402,6 +419,7 @@ impl Backend for Win32Backend {
         let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
         for n in &names { self.apply_gamma(n, 1.0, true); }
         self.set_magnification(1.0);
+        self.free_dcs();
         unsafe {
             UnregisterHotKey(self.hotkey_hwnd, HOTKEY_ID_UP);
             UnregisterHotKey(self.hotkey_hwnd, HOTKEY_ID_DOWN);
@@ -411,6 +429,7 @@ impl Backend for Win32Backend {
     }
     fn force_reset(&mut self) {
         let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
+        self.free_dcs();
         for n in &names {
             unsafe {
                 let dcn = wide(&n);

@@ -31,6 +31,8 @@ pub struct App {
     pub backend: Box<dyn Backend>,
     pub demo: bool,
     pub icon: HICON,
+    /// 大尺寸图标（对应 AppInfoWindow 里 65×65 的 Image）。
+    pub icon_large: HICON,
     pub scale: f64,
     pub instance: HINSTANCE,
     pub hwnd_controller: HWND,
@@ -88,6 +90,16 @@ pub fn app() -> &'static mut App { unsafe { &mut *APP } }
 pub fn has_app() -> bool { unsafe { !APP.is_null() } }
 
 pub fn now_ms() -> u64 { unsafe { GetTickCount64() } }
+
+/// 从 exe 自身的 RT_GROUP_ICON（由 build.rs 生成）取最接近 `px` 的一帧。
+/// 对应 csproj 的 `<ApplicationIcon>ProperDimIcon.ico</ApplicationIcon>`。
+pub fn load_icon(px: i32) -> HICON {
+    let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let h = unsafe { LoadImageW(hinst, 1 as *const u16, IMAGE_ICON, px, px, 0) };
+    if h != NULL { return h as HICON; }
+    // 资源缺失（例如未跑 build.rs）时退回内嵌 ico 的第一帧
+    make_icon()
+}
 
 /// 从嵌入的 ico 中取第一帧（16×16 32bpp DIB）创建 HICON。
 pub fn make_icon() -> HICON {
@@ -638,7 +650,7 @@ pub fn tray_modify_icon(hwnd: HWND, icon: HICON) {
 }
 /// 对应 SessionUnlock 时重建托盘图标。
 pub fn refresh_tray_icon() {
-    let icon = make_icon();
+    let icon = load_icon(crate::ui::s(16));
     if icon == NULL { return; }
     let a = app();
     let old = a.icon;
@@ -791,7 +803,7 @@ mod tests {
         let a = App {
             settings: AppSettings::default(),
             backend: Box::new(StubBackend::new()),
-            demo: true, icon: NULL, scale: 1.0, instance: NULL,
+            demo: true, icon: NULL, icon_large: NULL, scale: 1.0, instance: NULL,
             hwnd_controller: NULL, hwnd_panel: NULL, hwnd_tray_menu: NULL,
             hwnd_schedule: NULL, hwnd_min: NULL, hwnd_info: NULL, hwnd_warning: NULL,
             current_brightness: 1.0, last_hardware: 1.0, locked_hardware: 1.0,
@@ -805,10 +817,34 @@ mod tests {
             extra: ExtraApis {
                 dwm_set: None, dpi_for_monitor: None, wts_register: None,
                 wts_unregister: None, package_full_name: None,
+                time_begin: None, time_end: None,
             },
             hook: NULL, wts_registered: false, modal_depth: 0,
         };
         init(a);
+    }
+
+    #[test]
+    fn icon_resource_embedded() {
+        // 由 build.rs 生成的 RT_GROUP_ICON(id=1) 必须能被 LoadImage 取到
+        let h = unsafe {
+            LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as *const u16,
+                IMAGE_ICON, 32, 32, 0)
+        };
+        assert!(h != 0, "exe 缺少图标资源，资源管理器里会显示默认图标");
+        unsafe { DestroyIcon(h as HICON); }
+
+        // 用资源管理器同款 API 再确认一次（它会从 exe 里挑第一个图标组）
+        let exe = std::env::current_exe().expect("current_exe");
+        let path = wide(&exe.to_string_lossy());
+        let mut large: isize = 0;
+        let mut small: isize = 0;
+        let n = unsafe { ExtractIconExW(path.as_ptr(), 0, &mut large, &mut small, 1) };
+        assert!(n > 0 && large != 0, "ExtractIconEx 取不到 exe 图标（n={}）", n);
+        unsafe {
+            if large != 0 { DestroyIcon(large as HICON); }
+            if small != 0 { DestroyIcon(small as HICON); }
+        }
     }
 
     /// 两个场景共用全局 APP，必须放在同一个测试里串行执行。

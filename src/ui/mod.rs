@@ -88,6 +88,11 @@ pub fn create_window(
     if hwnd == NULL { unsafe { drop(Box::from_raw(boxed)); } return NULL; }
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, boxed as isize);
+        let icon = app::app().icon;
+        if icon != NULL {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG, icon as isize);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, icon as isize);
+        }
         theme::apply_round_region(hwnd, w, h, s(8));
         app::app().extra.apply_window_attributes(hwnd);
         relayout(&mut *boxed, w, h);
@@ -129,7 +134,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             GetClientRect(hwnd, &mut cr);
             let tr = ctx.title_rect(cr.width(), cr.height());
             let title = tr.as_ref().map(|_| (tr.unwrap(), ctx.title.as_str()));
-            paint_window(hwnd, &ctx.ui, ctx.bg, title, app::app().icon, app::app().scale);
+            paint_window(hwnd, &ctx.ui, ctx.bg, title,
+                app::app().icon, app::app().icon_large, app::app().scale);
             return 0;
         }
         WM_NCHITTEST => {
@@ -181,8 +187,13 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
                 let over = ctx.ui.widgets.iter().any(|ww| ww.tag == "preview" && ww.rect.contains(x, y));
                 if !over { app::stop_preview(); }
             }
+            let prev_hover = ctx.ui.hover;
+            let prev_capture = ctx.ui.capture;
             let ev = ctx.ui.mouse_move(x, y);
-            InvalidateRect(hwnd, std::ptr::null(), FALSE);
+            // 高刷新率鼠标每秒可发上千次移动事件，状态没变化时不要整窗重绘
+            if ev != Event::None || prev_hover != ctx.ui.hover || prev_capture != ctx.ui.capture {
+                InvalidateRect(hwnd, std::ptr::null(), FALSE);
+            }
             dispatch(ctx, ev, hwnd);
             return 0;
         }
