@@ -464,6 +464,14 @@ const INFO_URLS: &[&str] = &[
 ];
 
 pub fn show_info() {
+    // 对应上游 `AppInfoWindow { Owner = this }` + ShowDialog：Info 是控制面板的模态子窗口，
+    // 所以打开它时面板必须已经可见。这样点 Cool「返回」时只是隐藏 Info，
+    // 面板不需要重新 ShowWindow —— 从根源上避免「返回时主窗口闪一下」。
+    let panel_visible = {
+        let a = app::app();
+        a.hwnd_panel != NULL && unsafe { IsWindowVisible(a.hwnd_panel) } != 0
+    };
+    if !panel_visible { app::show_control_panel(); }
     let hwnd = &mut app::app().hwnd_info as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::InfoWindow);
     show_or_create(unsafe { &mut *hwnd }, "ProperDimRustInfo", "ProperDim Info", cw, ch,

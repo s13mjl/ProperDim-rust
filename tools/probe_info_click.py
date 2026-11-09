@@ -5,6 +5,7 @@ import subprocess
 import time
 import sys
 import os
+from PIL import ImageGrab
 
 u32 = ctypes.WinDLL("user32", use_last_error=True)
 u32.FindWindowW.restype = wt.HWND
@@ -63,7 +64,16 @@ try:
     info = wnd("ProperDimRustInfo")
     if info:
         # Info 窗口 "Cool" 按钮：(w-70)/2 .. +70, y=322..347
-        click(info, 160, 312)
+        click(info, 160, 304)
+        burst = []
+        for _ in range(6):
+            try:
+                g = ImageGrab.grab(bbox=(785, 440, 1135, 640)).convert("RGB")
+                px = list(g.resize((12, 8)).getdata())
+                burst.append(round(sum(sum(q) for q in px) / len(px) / 3))
+            except Exception:
+                burst.append(-1)
+        print("返回瞬间(面板本就可见) 6 帧平均亮度:", burst)
         snap("点 Cool")
         time.sleep(0.6)
         snap("Cool 之后 0.6s")
@@ -76,7 +86,18 @@ try:
         snap("面板置为隐藏")
         info2 = wnd("ProperDimRustInfo")
         click(info2, 160, 312)
-        time.sleep(0.4)
+        # 连拍：看「返回」瞬间主窗口有没有露出未绘制的空白帧
+        rect = (785, 440, 1135, 640)
+        frames = []
+        for _ in range(8):
+            try:
+                g = ImageGrab.grab(bbox=rect).convert("RGB")
+                px = list(g.resize((12, 8)).getdata())
+                frames.append(round(sum(sum(p) for p in px) / len(px) / 3))
+            except Exception:
+                frames.append(-1)
+            time.sleep(0.012)
+        print("返回瞬间 8 帧平均亮度:", frames)
         snap("隐藏态下点 Cool")
     else:
         print("!! Info 窗口未创建")

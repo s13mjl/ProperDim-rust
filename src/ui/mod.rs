@@ -36,6 +36,8 @@ pub struct WindowCtx {
     /// 拖拽拉伸上限（对应上游 ResizeThumb 的 150% 限制），0 表示不限制。
     pub max_w: i32,
     pub max_h: i32,
+    /// 上一次处理拖动事件的时间（用于把高刷鼠标的输入合并到帧率）
+    pub drag_tick: u64,
 }
 
 impl WindowCtx {
@@ -43,7 +45,7 @@ impl WindowCtx {
         WindowCtx {
             kind, ui: Ui::new(), title: title.to_string(), show_title,
             bg: c::BG, min_w: 0, min_h: 0, resizable: false, hide_on_deactivate: false,
-            win_style: WS_POPUP, max_w: 0, max_h: 0,
+            win_style: WS_POPUP, max_w: 0, max_h: 0, drag_tick: 0,
         }
     }
     pub fn title_rect(&self, w: i32, _h: i32) -> Option<RECT> {
@@ -167,9 +169,18 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         WM_LBUTTONUP => {
             let x = lparam_x(lparam); let y = lparam_y(lparam);
             let had_pressed = ctx.ui.pressed.is_some();
+            let was_slider = ctx.ui.capture.is_some();
+            // 节流期间可能丢掉了最后一个位置：补算并真正应用，保证停在鼠标实际位置
+            if was_slider {
+                if let Event::Value(id, v) = ctx.ui.mouse_move(x, y) {
+                    dispatch(ctx, Event::Value(id, v), hwnd);
+                }
+            }
             let ev = ctx.ui.mouse_up(x, y);
             if ctx.ui.capture.is_none() { ReleaseCapture(); }
             if app::app().preview_active { app::stop_preview(); }
+            // 拖动结束：补一次托盘 ToolTip（拖动期间为了流畅性是不刷的）
+            if was_slider { app::set_tooltip_brightness(); }
             // 按下态被清掉但没触发 Click（例如移出按钮后松手）也要擦掉高亮
             if ev == Event::None && had_pressed {
                 InvalidateRect(hwnd, std::ptr::null(), FALSE);
@@ -187,6 +198,13 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         }
         WM_MOUSEMOVE => {
             let x = lparam_x(lparam); let y = lparam_y(lparam);
+            // 拖动滑块时按 ~100Hz 合并输入：否则 1000Hz 鼠标每秒上千条 WM_MOUSEMOVE
+            // 会把队列占满，低优先级的 WM_PAINT 拿不到执行机会 → 拖影/一顿一顿。
+            if ctx.ui.capture.is_some() {
+                let now = app::now_ms();
+                if now.saturating_sub(ctx.drag_tick) < 10 { return 0; }
+                ctx.drag_tick = now;
+            }
             // 对应 PreviewButton_MouseLeave：按住预览时移出按钮即恢复
             if app::app().preview_active {
                 let over = ctx.ui.widgets.iter().any(|ww| ww.tag == "preview" && ww.rect.contains(x, y));

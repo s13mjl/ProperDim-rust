@@ -474,6 +474,10 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             if id == ID_SLIDER {
                 app::app().last_user_interaction = app::now_ms();
                 app::app().settings.last_opacity = v;
+                // 对应 XAML 的 {Binding ElementName=DimmerSlider, Path=Value, StringFormat={}{0:P0}}：
+                // 数字是滑块值的直接绑定，必须即时跟随；不能依赖 sync_brightness（它有 500ms 防抖，
+                // 拖动期间一直被挡住，于是数字看起来「不变」）
+                ctx.ui.set_text(ID_BRIGHTNESS_VALUE, &format!("{}%", (v * 100.0).round() as i32));
                 app::trigger_save();
                 if ctx.ui.slider_click {
                     // 对应 Slider_ValueChanged 的非拖动分支：ApplyBrightnessAnimated(200ms)
@@ -594,6 +598,7 @@ pub fn on_tray_menu(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             if id == ID_MENU_SLIDER {
                 app::app().last_user_interaction = app::now_ms();
                 app::app().settings.last_opacity = v;
+                ctx.ui.set_text(ID_MENU_VALUE, &format!("{}%", (v * 100.0).round() as i32));
                 app::trigger_save();
                 app::apply_brightness(v, false, false, 0, false);
             }

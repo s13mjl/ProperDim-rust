@@ -9,6 +9,7 @@
 > 第四轮：逐段读方法体，补齐数据格式、事件订阅、模态窗口、启动自修复、崩溃恢复、滚轮步进等剩余行为差异。
 > 第五轮：**真正逐行通读上游全部 14 个 `.cs`（5246 行）与 Rust 全部 9 个 `.rs`**，逐语句对照——抓到了前四轮「按方法名/清单抽样」结构性漏掉的一批 bug，包括**亮度动画实际只走第一帧**、**日程列表滚动完全失效**、**AM/PM 单选按钮无效**。
 > 第六轮：修用户实测反馈的四个问题——亮度调节卡顿、滑块圆点锯齿、链接文字偏左、exe 没有图标。
+> 第八轮：拖动时数字不跟随、拖动本身发涩、Cool 返回时主窗口闪一下——三条都从机制上修掉。
 > 第七轮：**用实测数据定位卡顿真因**（`SetDeviceGammaRamp` 单次阻塞 11ms + `WM_TIMER` 会被合并），改为「gamma 工作线程 + 消息循环驱动动画」；按钮改为松开触发；Info 内容按需求精简。
 
 ## 快速开始
@@ -189,6 +190,37 @@ target/release/ProperDim.exe --bench     # 性能实测，结果写到同目录 
 - **Cool 会「返回」**：Info 可以从 QuickDim/托盘菜单打开，那时控制面板本来就是隐藏的，直接关掉 Info 会让人以为什么都没了。现在关闭 Info 时若面板不可见就 `show_control_panel()`，可见则只把焦点还给面板。
 - **Info 内容精简**（按需求）：去掉 Twitch / YouTube / PayPal / "Created on" / "By ..." / "Like weird games?" 等推广行，只保留两个仓库地址——上游 `crustyoldhuman/ProperDim` 与本移植版 `s13mjl/ProperDim-rust`。`View help` 保留（它是功能入口，不是推广）。
 - 新增 `tools/probe_info_click.py`：真实点击 Info 的 Cool 并打印各窗口可见性，用来验证「返回」行为。
+
+## 第八轮：拖动手感与返回闪烁
+
+### 拖动时「Brightness Level」数字不变
+
+上游那个数字是 XAML 绑定：
+
+```xml
+<TextBlock Text="{Binding ElementName=DimmerSlider, Path=Value, StringFormat={}{0:P0}}" />
+```
+
+它是滑块值的**直接绑定**，与亮度同步逻辑无关。我误把它实现成 `sync_brightness()` 里的一次 `set_text`，而那个函数有 500ms 用户交互防抖——拖动期间每帧都在刷新时间戳，防抖永远成立，于是**整个拖动过程数字都不动**。
+
+修法：在滑块的 `Value` 事件里直接更新数字（QuickDim 的百分比同理），防抖只用于「别处改亮度时回写滑块」。
+
+### 拖动发涩
+
+高刷鼠标每秒发 1000 条 `WM_MOUSEMOVE`。`WM_PAINT` 和 `WM_TIMER` 一样是低优先级消息，队列被鼠标消息占满时**重绘会被饿死**，表现就是拖影、一顿一顿。三个措施：
+
+1. **拖动输入按 ~100Hz 合并**：捕获期间同一 10ms 内只处理一条移动消息，其余直接丢（`WindowCtx.drag_tick`）；松手时补处理最后一段，保证停在鼠标真实位置。
+2. **拖动期间不刷托盘 ToolTip**：每次 `Shell_NotifyIcon(NIM_MODIFY)` 实测 0.2–2.4ms，拖动时毫无意义；松手时补一次。
+3. 上一轮的 gamma 工作线程已经让硬件写入不再阻塞 UI。
+
+### Cool 返回时主窗口闪一下
+
+两个原因、两处修正：
+
+1. `ShowWindow` 到首次 `WM_PAINT` 之间，窗口表面是未绘制的——这就是那一帧「闪」。现在 `show_control_panel()` 先在**隐藏状态**下 `InvalidateRect(TRUE)` + `UpdateWindow()` 把内容画好，再 `ShowWindow`。
+2. 更根本的是：上游 `AppInfoWindow` 的 `Owner = ControlPanel` 且用 `ShowDialog()`，**面板从来不会被隐藏**，所以「返回」只是关掉子窗口。本版 Info 可以从 QuickDim/托盘菜单打开（面板是隐藏的），才产生了「重新显示面板」这个动作。现在 `show_info()` 会先把面板显示出来（对应 Owner 语义），返回时就没有窗口显示动作了。
+
+验证：`tools/probe_drag.py` 模拟 250Hz 拖动后比对截图——数字区变化 165 像素、整窗 1480 像素，确认数字与圆点都在跟随；`probe_info_click.py` 在返回瞬间连拍 6–8 帧，亮度值完全平稳（无异常亮/暗帧）。
 
 ## 剩余差异（诚实清单）
 

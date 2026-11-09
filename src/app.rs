@@ -283,7 +283,14 @@ pub fn show_control_panel() {
     // 对应 ControlPanel_IsVisibleChanged / SyncSliderWithOpacity / OnActivated
     ui::panels::sync_brightness(h, a.current_brightness);
     refresh_panel_list();
-    unsafe { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); InvalidateRect(h, std::ptr::null(), FALSE); }
+    unsafe {
+        // 先在「隐藏」状态把内容画到窗口表面，再显示。
+        // 否则 ShowWindow 到首次 WM_PAINT 之间会露出未绘制的内容，看起来是闪一下。
+        InvalidateRect(h, std::ptr::null(), TRUE);
+        UpdateWindow(h);
+        ShowWindow(h, SW_SHOW);
+        SetForegroundWindow(h);
+    }
 }
 pub fn toggle_control_panel() {
     let a = app();
@@ -349,7 +356,10 @@ pub fn apply_brightness(logical: f64, animate: bool, ignore_minimum: bool, durat
     a.backend.apply_brightness(l, min, ignore_minimum);
     // 对应：动画回调期间不刷 ToolTip；QuickDim 可见时也不刷
     let menu_visible = a.hwnd_tray_menu != NULL && unsafe { IsWindowVisible(a.hwnd_tray_menu) } != 0;
-    if !a.anim_updating && !menu_visible { set_tooltip_brightness(); }
+    // 拖动过程中（100ms 内有用户交互）不刷托盘 ToolTip：每次 NIM_MODIFY 要 0.2~2.4ms，
+    // 拖动结束时会由 WM_LBUTTONUP 补一次
+    let recently_touched = now_ms().saturating_sub(a.last_user_interaction) < 100;
+    if !a.anim_updating && !menu_visible && !recently_touched { set_tooltip_brightness(); }
     if a.hwnd_panel != NULL {
         if !a.preview_isolated && now_ms() - a.last_user_interaction >= 500 {
             ui::panels::sync_brightness(a.hwnd_panel, l);
