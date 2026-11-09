@@ -21,15 +21,23 @@ fn main() {
         let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
         let dir = std::path::PathBuf::from(base).join("ProperDim").join("CrashLogs");
         let _ = std::fs::create_dir_all(&dir);
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs()).unwrap_or(0);
-        let _ = std::fs::write(dir.join(format!("Crash_{}.txt", stamp)), format!("{}", info));
+        let mut st = SYSTEMTIME::default();
+        unsafe { GetLocalTime(&mut st); }
+        let name = format!("Crash_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.txt",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        let _ = std::fs::write(dir.join(name), format!("{}", info));
     }));
 
     let args: Vec<String> = std::env::args().collect();
     let demo = args.iter().any(|a| a.eq_ignore_ascii_case("--demo"))
         || std::env::var("PROPERDIM_DEMO").map(|v| v == "1").unwrap_or(false);
     let is_reset = args.iter().any(|a| a.to_lowercase().contains("reset"));
+
+    // 对应 App.xaml.cs：卸载器 reset 必须在单实例检查之前，否则主程序运行时会被 Mutex 挡掉
+    if is_reset {
+        synchronous_reset();
+        unsafe { ExitProcess(0); }
+    }
 
     // 1. 单实例检查（对应 App.xaml.cs 的 Mutex("ProperDim_Unique_Mutex")）
     unsafe {
@@ -40,17 +48,14 @@ fn main() {
         }
     }
 
-    // 2. 卸载器同步重置（对应 PerformSynchronousReset）
-    if is_reset {
-        synchronous_reset();
-        unsafe { ExitProcess(0); }
-    }
-
     // 3. DPI（对应 app.manifest 的 PerMonitorV2）
     unsafe { SetProcessDpiAwarenessContext(-4isize); }
+    app::ensure_readme();
 
     let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
     let icon = app::make_icon();
+    let extra_apis = ExtraApis::load();
+    config::set_msix(extra_apis.is_msix());
 
     // 4. 控制器窗口（对应隐藏的 MainWindow / TaskbarIcon 宿主）
     let cls = {
@@ -65,8 +70,9 @@ fn main() {
             last_menu_close_tick: 0, is_shutting_down: false,
             preview_active: false, preview_restore: 1.0, save_pending: false,
             edit_schedule_index: None, warning_action: WarningAction::None,
-            warning_result: None, anim: AnimState::default(),
+            warning_result: None,             anim: AnimState::default(),
             monitors: Vec::new(), tray_added: false,
+            extra: extra_apis, hook: NULL, wts_registered: false,
         };
         app_stub.current_brightness = app_stub.settings.last_opacity;
         app::init(app_stub);
@@ -75,7 +81,7 @@ fn main() {
 
     let controller_ctx = ui::WindowCtx::new(WindowKind::Controller, "", false);
     let controller = ui::create_window(&cls, "ProperDim Controller", 0, 0, 0, 0,
-        WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT, controller_ctx, false);
+        WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED, controller_ctx, false);
     if controller == NULL {
         unsafe {
             let t = wide("Startup Error: failed to create controller window");
@@ -94,8 +100,9 @@ fn main() {
         a.scale = scale;
     }
 
-    // 5. 托盘、定时器、热键、显示器（对应 MainWindow 构造函数）
+    // 5. 托盘、定时器、热键、显示器、会话通知（对应 MainWindow 构造函数 + SystemEvents）
     app::tray_add(controller, icon);
+    app::register_session_notification(controller);
     unsafe {
         SetTimer(controller, app::TIMER_SCHEDULE, 10_000, std::ptr::null());
         SetTimer(controller, app::TIMER_WATCHDOG, 1_000, std::ptr::null());
@@ -125,16 +132,14 @@ fn main() {
         }
     }
 
+    app::unregister_session_notification(controller);
+    app::remove_mouse_hook();
     app::shutdown_app();
 }
 
 fn synchronous_reset() {
     let mut b = backend::create_backend(false);
-    let monitors = b.refresh_monitors();
-    for m in &monitors {
-        // 直接把 LUT 恢复到 1.0（对应 App.PerformSynchronousReset）
-        b.apply_brightness(1.0, 0.0, true);
-        let _ = m;
-    }
+    b.refresh_monitors();
+    b.force_reset();
     b.shutdown();
 }

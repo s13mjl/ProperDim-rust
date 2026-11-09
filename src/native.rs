@@ -37,6 +37,7 @@ pub const WM_CREATE: UINT = 0x0001;
 pub const WM_DESTROY: UINT = 0x0002;
 pub const WM_NCDESTROY: UINT = 0x0082;
 pub const WM_SIZE: UINT = 0x0005;
+pub const WM_MOVE: UINT = 0x0003;
 pub const WM_PAINT: UINT = 0x000F;
 pub const WM_CLOSE: UINT = 0x0010;
 pub const WM_ERASEBKGND: UINT = 0x0014;
@@ -518,6 +519,212 @@ impl Magnification {
     }
 }
 
+// ---- 1:1 补齐：会话 / 电源 / 关机 / 钩子 / DWM / DisplayConfig 常量 ----
+pub const WM_QUERYENDSESSION: UINT = 0x0011;
+pub const WM_ENDSESSION: UINT = 0x0016;
+pub const WM_MOUSEWHEEL_HOOK: UINT = 0x020A;
+pub const WH_MOUSE_LL: i32 = 14;
+pub const HC_ACTION: i32 = 0;
+pub const WTS_SESSION_LOCK: usize = 0x7;
+pub const WTS_SESSION_UNLOCK: usize = 0x8;
+pub const NOTIFY_FOR_THIS_SESSION: u32 = 0;
+pub const PBT_APMRESUMEAUTOMATIC: usize = 0x12;
+pub const PBT_APMRESUMESUSPEND: usize = 0x7;
+pub const PBT_APMSUSPEND: usize = 0x4;
+pub const SPI_GETDROPSHADOW: u32 = 0x1024;
+pub const DWMWA_USE_IMMERSIVE_DARK_MODE: i32 = 20;
+pub const DWMWA_WINDOW_CORNER_PREFERENCE: i32 = 33;
+pub const DWMWCP_ROUND: i32 = 2;
+pub const MDT_EFFECTIVE_DPI: i32 = 0;
+pub const DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME: u32 = 1;
+pub const DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME: u32 = 2;
+pub const DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO: u32 = 9;
+pub const ERROR_SUCCESS: i32 = 0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct LUID { pub low_part: u32, pub high_part: i32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DISPLAYCONFIG_DEVICE_INFO_HEADER {
+    pub kind: u32, pub size: u32, pub adapter_id: LUID, pub id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DISPLAYCONFIG_SOURCE_DEVICE_NAME {
+    pub header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    pub view_gdi_device_name: [u16; 32],
+}
+impl Default for DISPLAYCONFIG_SOURCE_DEVICE_NAME { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DISPLAYCONFIG_TARGET_DEVICE_NAME {
+    pub header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    pub flags: u32, pub output_technology: u32,
+    pub edid_manufacture_id: u16, pub edid_product_code_id: u16, pub connector_instance: u32,
+    pub monitor_friendly_device_name: [u16; 64],
+    pub monitor_device_path: [u16; 128],
+}
+impl Default for DISPLAYCONFIG_TARGET_DEVICE_NAME { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+    pub header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    pub value: u32, pub color_encoding: u32, pub bits_per_color_channel: u32,
+}
+impl Default for DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Rational { pub numerator: u32, pub denominator: u32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DISPLAYCONFIG_PATH_SOURCE_INFO {
+    pub adapter_id: LUID, pub id: u32, pub mode_info_idx: u32, pub status_flags: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DISPLAYCONFIG_PATH_TARGET_INFO {
+    pub adapter_id: LUID, pub id: u32, pub mode_info_idx: u32,
+    pub output_technology: u32, pub rotation: u32, pub scaling: u32,
+    pub refresh_rate: Rational, pub scanline_ordering: u32,
+    pub target_available: u32, pub status_flags: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DISPLAYCONFIG_PATH_INFO {
+    pub source_info: DISPLAYCONFIG_PATH_SOURCE_INFO,
+    pub target_info: DISPLAYCONFIG_PATH_TARGET_INFO,
+    pub flags: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DISPLAYCONFIG_MODE_INFO {
+    pub info_type: u32, pub id: u32, pub adapter_id: LUID, pub mode_info: [u8; 64],
+}
+impl Default for DISPLAYCONFIG_MODE_INFO { fn default() -> Self { unsafe { std::mem::zeroed() } } }
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct NOTIFYICONIDENTIFIER {
+    pub cb_size: u32, pub hwnd: HWND, pub uid: u32, pub guid_item: GUID,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct MSLLHOOKSTRUCT {
+    pub pt: POINT, pub mouse_data: i32, pub flags: i32, pub time: i32, pub dw_extra_info: isize,
+}
+
+#[link(name = "user32")]
+extern "system" {
+    pub fn SetWindowsHookExW(id_hook: i32, lpfn: *const c_void, h_mod: HINSTANCE, thread_id: u32) -> isize;
+    pub fn UnhookWindowsHookEx(hhk: isize) -> BOOL;
+    pub fn CallNextHookEx(hhk: isize, code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
+    pub fn SetCursorPos(x: i32, y: i32) -> BOOL;
+    pub fn SystemParametersInfoW(action: u32, param: u32, value: *mut c_void, win_ini: u32) -> BOOL;
+    pub fn GetDisplayConfigBufferSizes(flags: u32, paths: *mut u32, modes: *mut u32) -> i32;
+    pub fn QueryDisplayConfig(flags: u32, path_count: *mut u32, paths: *mut DISPLAYCONFIG_PATH_INFO,
+        mode_count: *mut u32, modes: *mut DISPLAYCONFIG_MODE_INFO, topology: *mut u32) -> i32;
+    pub fn DisplayConfigGetDeviceInfo(request: *mut c_void) -> i32;
+    pub fn MonitorFromPoint(pt: POINT, flags: u32) -> HWND;
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    pub fn Shell_NotifyIconGetRect(id: *const NOTIFYICONIDENTIFIER, rect: *mut RECT) -> i32;
+}
+
+// ---- 动态加载：这些库没有稳定导入库可用 ----
+pub type FnDwmSetWindowAttribute = unsafe extern "system" fn(HWND, i32, *const c_void, u32) -> i32;
+pub type FnGetDpiForMonitor = unsafe extern "system" fn(HWND, i32, *mut u32, *mut u32) -> i32;
+pub type FnWtsRegister = unsafe extern "system" fn(HWND, u32) -> BOOL;
+pub type FnWtsUnregister = unsafe extern "system" fn(HWND) -> BOOL;
+pub type FnGetCurrentPackageFullName = unsafe extern "system" fn(*mut u32, *mut u16) -> i32;
+
+pub struct ExtraApis {
+    pub dwm_set: Option<FnDwmSetWindowAttribute>,
+    pub dpi_for_monitor: Option<FnGetDpiForMonitor>,
+    pub wts_register: Option<FnWtsRegister>,
+    pub wts_unregister: Option<FnWtsUnregister>,
+    pub package_full_name: Option<FnGetCurrentPackageFullName>,
+}
+impl ExtraApis {
+    pub fn load() -> Self {
+        unsafe fn proc(h: HMODULE, name: &[u8]) -> *const c_void {
+            let mut n = name.to_vec(); n.push(0);
+            unsafe { GetProcAddress(h, n.as_ptr()) }
+        }
+        unsafe {
+            let get = |lib: &str| -> HMODULE {
+                let w = wide(lib);
+                LoadLibraryW(w.as_ptr())
+            };
+            let dwm = get("dwmapi.dll");
+            let shcore = get("shcore.dll");
+            let wts = get("wtsapi32.dll");
+            let k32 = get("kernel32.dll");
+            let mut out = ExtraApis { dwm_set: None, dpi_for_monitor: None,
+                wts_register: None, wts_unregister: None, package_full_name: None };
+            let p = proc(dwm, b"DwmSetWindowAttribute");
+            if !p.is_null() { out.dwm_set = Some(std::mem::transmute::<*const c_void, FnDwmSetWindowAttribute>(p)); }
+            let p = proc(shcore, b"GetDpiForMonitor");
+            if !p.is_null() { out.dpi_for_monitor = Some(std::mem::transmute::<*const c_void, FnGetDpiForMonitor>(p)); }
+            let p = proc(wts, b"WTSRegisterSessionNotification");
+            if !p.is_null() { out.wts_register = Some(std::mem::transmute::<*const c_void, FnWtsRegister>(p)); }
+            let p = proc(wts, b"WTSUnRegisterSessionNotification");
+            if !p.is_null() { out.wts_unregister = Some(std::mem::transmute::<*const c_void, FnWtsUnregister>(p)); }
+            let p = proc(k32, b"GetCurrentPackageFullName");
+            if !p.is_null() { out.package_full_name = Some(std::mem::transmute::<*const c_void, FnGetCurrentPackageFullName>(p)); }
+            out
+        }
+    }
+    pub fn apply_window_attributes(&self, hwnd: HWND) {
+        unsafe {
+            if let Some(f) = self.dwm_set {
+                let round = DWMWCP_ROUND;
+                f(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const c_void, 4);
+                let dark = if apps_use_dark_theme() { 1i32 } else { 0i32 };
+                f(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const c_void, 4);
+            }
+        }
+    }
+    pub fn is_msix(&self) -> bool {
+        unsafe {
+            match self.package_full_name {
+                Some(f) => {
+                    let mut len = 0u32;
+                    f(&mut len, std::ptr::null_mut());
+                    len > 0
+                }
+                None => false,
+            }
+        }
+    }
+}
+
+/// 对应 `AppInfoWindow.OnSourceInitialized` 读取 `AppsUseLightTheme`。
+pub fn apps_use_dark_theme() -> bool {
+    unsafe {
+        let sub = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        let name = wide("AppsUseLightTheme");
+        let mut hk: isize = 0;
+        if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_QUERY_VALUE, &mut hk) != 0 { return false; }
+        let mut val: u32 = 1;
+        let mut size = 4u32;
+        let mut kind = 0u32;
+        let r = RegQueryValueExW(hk, name.as_ptr(), std::ptr::null_mut(), &mut kind,
+            &mut val as *mut _ as *mut u8, &mut size);
+        RegCloseKey(hk);
+        r == 0 && kind == 4 /* REG_DWORD */ && val == 0
+    }
+}
+
 // ---- 工具 ----
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -538,4 +745,22 @@ pub fn from_wide(p: *const u16) -> String {
 pub fn from_wide_buf(b: &[u16]) -> String {
     let n = b.iter().position(|&c| c == 0).unwrap_or(b.len());
     String::from_utf16_lossy(&b[..n])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn displayconfig_layout_matches_sdk() {
+        assert_eq!(std::mem::size_of::<DISPLAYCONFIG_DEVICE_INFO_HEADER>(), 20);
+        assert_eq!(std::mem::size_of::<DISPLAYCONFIG_PATH_INFO>(), 72);
+        assert_eq!(std::mem::size_of::<DISPLAYCONFIG_MODE_INFO>(), 80);
+        assert_eq!(std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(), 84);
+        assert_eq!(std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>(), 420);
+        assert_eq!(std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>(), 32);
+        assert_eq!(std::mem::size_of::<NOTIFYICONIDENTIFIER>(), 40);
+        assert_eq!(std::mem::size_of::<RAMP>(), 1536);
+    }
+    #[test]
+    fn colorref_order() { assert_eq!(rgb(0x11, 0x22, 0x33), 0x332211); }
 }

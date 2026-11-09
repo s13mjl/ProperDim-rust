@@ -2,6 +2,7 @@
 #![allow(dead_code, static_mut_refs)]
 
 use crate::app;
+use crate::config;
 use crate::native::*;
 use crate::theme::{c, Event, Kind};
 use crate::ui::{self, dialogs, s, mk, WindowCtx, WindowKind};
@@ -173,10 +174,12 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
                 Kind::Label("Increase Brightness:".into(), 11, c::WHITE)));
             ctx.ui.widgets.push(mk(ID_INC_TEXT, w - 140, 86, 130, 22,
                 Kind::TextBox(st.increase_hotkey.clone())));
+            if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "hotkey".into(); }
             ctx.ui.widgets.push(mk(101, 20, 116, 180, 18,
                 Kind::Label("Decrease Brightness:".into(), 11, c::WHITE)));
             ctx.ui.widgets.push(mk(ID_DEC_TEXT, w - 140, 114, 130, 22,
                 Kind::TextBox(st.decrease_hotkey.clone())));
+            if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "hotkey".into(); }
             ctx.ui.widgets.push(mk(102, 20, 142, w - 40, 18,
                 Kind::Label("Click a field, then press desired keys".into(), 11, c::MUTED)));
             if !st.hotkeys_enabled {
@@ -205,6 +208,53 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
         }
     }
     ctx.ui.widgets.push(mk(999, w - 14, h - 14, 12, 12, Kind::ResizeGrip));
+}
+
+/// 1:1 对应 `ControlPanel.HotkeyTextBox_PreviewKeyDown()`：录制组合键并立即重新注册。
+pub fn record_hotkey(ctx: &mut WindowCtx, id: u32, vk: u32, lparam: LPARAM) {
+    let mut parts: Vec<String> = Vec::new();
+    unsafe {
+        if GetAsyncKeyState(VK_CONTROL) != 0 { parts.push("Ctrl".into()); }
+        if GetAsyncKeyState(VK_MENU) != 0 { parts.push("Alt".into()); }
+        if GetAsyncKeyState(VK_SHIFT) != 0 { parts.push("Shift".into()); }
+        if GetAsyncKeyState(VK_LWIN) != 0 { parts.push("Win".into()); }
+    }
+    let raw_name = unsafe {
+        let mut buf = [0u16; 64];
+        let n = GetKeyNameTextW(lparam, buf.as_mut_ptr(), 64);
+        if n > 0 { from_wide_buf(&buf) } else { String::new() }
+    };
+    let key = wpf_key_name(vk, &raw_name);
+    if !key.is_empty() { parts.push(key); }
+    let text = parts.join(" + ");
+    if text.is_empty() { return; }
+    ctx.ui.set_text(id, &text);
+    let a = app::app();
+    if id == ID_INC_TEXT { a.settings.increase_hotkey = text; }
+    else if id == ID_DEC_TEXT { a.settings.decrease_hotkey = text; }
+    config::save(&a.settings);
+    let (inc, dec, en, hwnd) = (a.settings.increase_hotkey.clone(),
+        a.settings.decrease_hotkey.clone(), a.settings.hotkeys_enabled, a.hwnd_controller);
+    a.backend.register_hotkeys(hwnd, en, &inc, &dec);
+    unsafe { InvalidateRect(a.hwnd_panel, std::ptr::null(), FALSE); }
+}
+
+/// 把虚拟键映射成原版 WPF `Key.ToString()` 的字符串（parse_hotkey 认识的形式）。
+fn wpf_key_name(vk: u32, raw: &str) -> String {
+    match vk {
+        0x08 => "Backspace".into(), 0x09 => "Tab".into(), 0x0D => "Enter".into(),
+        0x1B => "Escape".into(), 0x20 => "Space".into(),
+        0x21 => "PageUp".into(), 0x22 => "PageDown".into(),
+        0x23 => "End".into(), 0x24 => "Home".into(),
+        0x25 => "Left".into(), 0x26 => "Up".into(), 0x27 => "Right".into(), 0x28 => "Down".into(),
+        0x2D => "Insert".into(), 0x2E => "Delete".into(),
+        0x70..=0x7B => format!("F{}", vk - 0x6F),
+        0x41..=0x5A => ((vk as u8) as char).to_string(),
+        0x30..=0x39 => format!("D{}", (vk as u8 as char)),
+        0x60..=0x69 => format!("NumPad{}", vk - 0x60),
+        0x10 | 0x11 | 0x12 | 0x5B | 0x5C => String::new(), // 纯修饰键不记
+        _ => raw.trim().replace(' ', ""),
+    }
 }
 
 pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
@@ -318,8 +368,8 @@ pub fn layout_tray_menu(ctx: &mut WindowCtx, w: i32, _h: i32) {
 pub fn on_tray_menu(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => match id {
-            ID_MENU_CONTROLS => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::show_control_panel(); }
-            ID_MENU_EXIT => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::shutdown_app(); }
+            ID_MENU_CONTROLS => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::remove_mouse_hook(); app::show_control_panel(); }
+            ID_MENU_EXIT => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::remove_mouse_hook(); app::shutdown_app(); }
             _ => {}
         },
         Event::Value(id, v) => {
@@ -347,14 +397,33 @@ pub fn show_tray_menu() {
         ui::relayout_public(ctx, cr.width(), cr.height());
     }
     unsafe {
-        let mut pt = POINT::default();
-        GetCursorPos(&mut pt);
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let x = (pt.x - cr.width()).clamp(0, sw - cr.width());
-        let y = (pt.y - cr.height()).max(0);
+        // 对应 GetTrayIconScreenPosition + TrayMenuWindow 的任务栏方位定位
+        let icon = app::tray_icon_position();
+        let mon = MonitorFromPoint(icon, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFOEXW::default();
+        mi.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        let (work, screen) = if mon != NULL && GetMonitorInfoW(mon, &mut mi) != 0 {
+            (mi.rcWork, mi.rcMonitor)
+        } else {
+            (RECT::new(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)),
+             RECT::new(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)))
+        };
+        let (cw, ch) = (cr.width(), cr.height());
+        let (mut x, mut y) = if work.top > screen.top {
+            (icon.x - cw / 2, work.top)
+        } else if work.left > screen.left {
+            (work.left, icon.y - ch / 2)
+        } else if work.right < screen.right {
+            (work.right - cw, icon.y - ch / 2)
+        } else {
+            (icon.x - cw / 2, work.bottom - ch)
+        };
+        x = x.clamp(work.left, (work.right - cw).max(work.left));
+        y = y.clamp(work.top, (work.bottom - ch).max(work.top));
         SetWindowPos(h, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
         ShowWindow(h, SW_SHOWNA);
     }
+    app::install_mouse_hook();
 }
 
 /// 亮度变化时同步滑块与数值标签（对应 XAML 的 `{Binding ElementName=...Slider, Path=Value}`）。
@@ -384,5 +453,6 @@ pub fn toggle_tray_menu() {
     if now - a.last_menu_close_tick < 250 { return; }
     if a.hwnd_tray_menu != NULL && unsafe { IsWindowVisible(a.hwnd_tray_menu) } != 0 {
         unsafe { ShowWindow(a.hwnd_tray_menu, SW_HIDE); }
+        app::remove_mouse_hook();
     } else { show_tray_menu(); }
 }

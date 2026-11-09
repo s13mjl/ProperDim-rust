@@ -83,6 +83,7 @@ pub fn create_window(
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, boxed as isize);
         theme::apply_round_region(hwnd, w, h, s(8));
+        app::app().extra.apply_window_attributes(hwnd);
         relayout(&mut *boxed, w, h);
     }
     hwnd
@@ -107,10 +108,10 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         WM_HOTKEY => { app::on_hotkey(wparam as i32); return 0; }
         WM_TIMER => { app::handle_timer(wparam); return 0; }
         WM_DISPLAYCHANGE | WM_SETTINGCHANGE => { app::debounce_refresh(); return 0; }
-        WM_WTSSESSION_CHANGE | WM_POWERBROADCAST => {
-            app::app().locked_hardware = app::app().last_hardware;
-            return 0;
-        }
+        WM_WTSSESSION_CHANGE => { app::handle_session_change(wparam); return 0; }
+        WM_POWERBROADCAST => { app::handle_power(wparam); return 0; }
+        WM_QUERYENDSESSION => { return 1; }
+        WM_ENDSESSION => { app::handle_end_session(); return 0; }
         _ => {}
     }
 
@@ -175,10 +176,18 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             dispatch(ctx, ev, hwnd);
             return 0;
         }
-        WM_KEYDOWN => {
-            if wparam as i32 == VK_ESCAPE && ctx.kind != WindowKind::Controller {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if msg == WM_KEYDOWN && wparam as i32 == VK_ESCAPE && ctx.kind != WindowKind::Controller {
                 ShowWindow(hwnd, SW_HIDE);
                 return 0;
+            }
+            // 对应 HotkeyTextBox_PreviewKeyDown：录制组合键
+            if let Some(id) = ctx.ui.focus {
+                let is_hotkey = ctx.ui.get(id).map(|w| w.tag.as_str()) == Some("hotkey");
+                if is_hotkey {
+                    panels::record_hotkey(ctx, id, wparam as u32, lparam);
+                    return 0;
+                }
             }
             if wparam as i32 == VK_RETURN || wparam as i32 == VK_SPACE {
                 if let Some(id) = ctx.ui.focus {
@@ -190,6 +199,7 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         }
         WM_CHAR => {
             if let Some(id) = ctx.ui.focus {
+                if ctx.ui.get(id).map(|w| w.tag.as_str()) == Some("hotkey") { return 0; }
                 let ch = char::from_u32(wparam as u32).unwrap_or('\0');
                 if ch == '\u{0008}' {
                     let old = match ctx.ui.get(id).map(|w| &w.kind) {
@@ -209,6 +219,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         WM_ACTIVATE => {
             if ctx.hide_on_deactivate && (wparam & 0xFFFF) == 0 {
                 ShowWindow(hwnd, SW_HIDE);
+                app::remove_mouse_hook();
+                app::check_and_close_overflow();
                 app::app().last_menu_close_tick = app::now_ms();
                 app::set_tooltip_brightness();
             }
@@ -225,8 +237,28 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         WM_SIZE => {
             let w = loword(lparam as usize); let h = hiword(lparam as usize);
             theme::apply_round_region(hwnd, w, h, s(8));
+            // 对应 Window_SizeChanged：持久化窗口尺寸
+            if ctx.kind == WindowKind::ControlPanel {
+                let sc = app::app().scale;
+                let a = app::app();
+                a.settings.control_panel_width = (w as f64 / sc).round();
+                a.settings.control_panel_height = (h as f64 / sc).round();
+                app::trigger_save();
+            }
             relayout(ctx, w, h);
             return 0;
+        }
+        WM_MOVE => {
+            // 对应 Window_LocationChanged：持久化窗口位置
+            if ctx.kind == WindowKind::ControlPanel {
+                let mut r = RECT::default();
+                GetWindowRect(hwnd, &mut r);
+                let a = app::app();
+                a.settings.control_panel_left = r.left as f64;
+                a.settings.control_panel_top = r.top as f64;
+                app::trigger_save();
+            }
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
         }
         WM_CLOSE => {
             if ctx.kind == WindowKind::ControlPanel { app::hide_control_panel(true); }

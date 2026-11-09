@@ -5,6 +5,11 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 对应 `NativeMethods.IsRunningAsMsix()`：MSIX 包内 exe 目录不可写，直接用 LocalAppData。
+static MSIX_MODE: AtomicBool = AtomicBool::new(false);
+pub fn set_msix(v: bool) { MSIX_MODE.store(v, Ordering::Relaxed); }
 
 // ---------------------------------------------------------------------------
 // 极简 JSON
@@ -304,7 +309,13 @@ impl AppSettings {
 }
 
 /// 对应 `ConfigManager.GetSettingsFilePath()`：优先 exe 同目录，否则 %LOCALAPPDATA%\ProperDim。
+fn local_appdata_path() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join("ProperDim").join("settings.json")
+}
+
 pub fn settings_path() -> PathBuf {
+    if MSIX_MODE.load(Ordering::Relaxed) { return local_appdata_path(); }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join("__properdim_write_test__.tmp");
@@ -314,8 +325,7 @@ pub fn settings_path() -> PathBuf {
             }
         }
     }
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("ProperDim").join("settings.json")
+    local_appdata_path()
 }
 
 pub fn load() -> AppSettings {
@@ -330,4 +340,37 @@ pub fn save(s: &AppSettings) {
     let p = settings_path();
     if let Some(d) = p.parent() { let _ = fs::create_dir_all(d); }
     let _ = fs::write(&p, s.to_json());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn json_roundtrip() {
+        let s = AppSettings::default();
+        let text = s.to_json();
+        let parsed = parse_json(&text).expect("valid json");
+        let s2 = AppSettings::from_json(&parsed);
+        assert!(s2.show_on_startup);
+        assert_eq!(s2.last_opacity, 1.0);
+        assert!((s2.global_minimum - 0.30).abs() < 1e-9);
+        assert_eq!(s2.last_schedule_days, "Mo,Tu,We,Th,Fr,Sa,Su");
+    }
+    #[test]
+    fn schedule_display_formats() {
+        let sc = DimSchedule { time: (13, 45), brightness: 0.25,
+            days: "Mo,Tu".into(), last_triggered: "0001-01-01T00:00:00".into() };
+        assert_eq!(sc.display_time(true), "13:45");
+        assert_eq!(sc.display_time(false), "1:45 PM");
+        assert_eq!(sc.display(), "25%");
+    }
+    #[test]
+    fn reads_original_csharp_json() {
+        let raw = r#"{"ShowOnStartup":false,"GlobalMinimum":0.15,"SavedSchedules":[{"Time":"07:03:00","Brightness":0.4,"Days":"Mo,We","LastTriggered":"2026-11-01T07:03:00"}],"LastOpacity":0.66}"#;
+        let s = AppSettings::from_json(&parse_json(raw).unwrap());
+        assert!(!s.show_on_startup);
+        assert!((s.global_minimum - 0.15).abs() < 1e-9);
+        assert_eq!(s.saved_schedules[0].time, (7, 3));
+        assert_eq!(s.last_opacity, 0.66);
+    }
 }

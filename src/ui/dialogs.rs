@@ -195,7 +195,7 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                 }
                 ID_SCH_MINUTE => {
                     let (h, _) = unsafe { SCH_TIME };
-                    let values: Vec<u32> = (0..60).step_by(5).collect();
+                    let values: Vec<u32> = (0..60).collect();
                     let m = pick_number(hwnd, &values, unsafe { SCH_TIME.1 });
                     unsafe { SCH_TIME = (h, m); }
                     relayout_hwnd(ctx, hwnd);
@@ -402,11 +402,16 @@ pub fn on_info(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         match id {
             ID_CLOSE | ID_INFO_COOL => unsafe { ShowWindow(hwnd, SW_HIDE); },
             ID_INFO_HELP => {
-                let exe = std::env::current_exe().ok();
-                if let Some(p) = exe.and_then(|e| e.parent().map(|d| d.join("ProperDim_README.txt"))) {
-                    let s = wide(&p.to_string_lossy());
-                    let op = wide("open");
-                    unsafe { ShellExecuteW(NULL, op.as_ptr(), s.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL); }
+                let path = app::readme_path();
+                let s = wide(&path.to_string_lossy());
+                let op = wide("open");
+                let r = unsafe {
+                    ShellExecuteW(NULL, op.as_ptr(), s.as_ptr(), std::ptr::null(),
+                        std::ptr::null(), SW_SHOWNORMAL)
+                };
+                if (r as isize) <= 32 {
+                    show_warning("Error", &format!("Unable to open help file: {}", path.display()),
+                        true, "OK", WarningAction::None);
                 }
             }
             i if (ID_INFO_LINK_BASE..ID_INFO_LINK_BASE + 4).contains(&i) => {

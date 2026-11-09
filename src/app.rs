@@ -7,14 +7,19 @@ use crate::config::{self, AppSettings, DimSchedule};
 use crate::native::*;
 use crate::ui;
 use crate::ui::dialogs::WarningAction;
+use std::ffi::c_void;
 
 static ICON_ICO: &[u8] = include_bytes!("../assets/icon.ico");
+/// 对应 C# csproj 的 `Content Include="ProperDim_README.txt" CopyToOutputDirectory=Always`。
+static README_TXT: &[u8] = include_bytes!("../ProperDim_README.txt");
 
 pub const TIMER_SCHEDULE: usize = 1;
 pub const TIMER_SAVE: usize = 2;
 pub const TIMER_DEBOUNCE: usize = 3;
 pub const TIMER_WATCHDOG: usize = 4;
 pub const TIMER_ANIM: usize = 5;
+pub const TIMER_SESSION_UNLOCK: usize = 6;
+pub const TIMER_POWER_RESUME: usize = 7;
 
 pub const MENU_CONTROLS: usize = 1001;
 pub const MENU_QUICKDIM: usize = 1002;
@@ -52,6 +57,9 @@ pub struct App {
     pub anim: AnimState,
     pub monitors: Vec<MonitorInfo>,
     pub tray_added: bool,
+    pub extra: ExtraApis,
+    pub hook: isize,
+    pub wts_registered: bool,
 }
 
 #[derive(Default)]
@@ -88,13 +96,20 @@ pub fn make_icon() -> HICON {
 // ---------------------------------------------------------------------------
 // 托盘 / 原生菜单
 // ---------------------------------------------------------------------------
+/// 对应 H.NotifyIcon 的持久 GUID：托盘图标以 GUID 标识，Shell_NotifyIconGetRect 才能稳定定位。
+pub const TRAY_GUID: GUID = GUID {
+    data1: 0x9E5A_3C21, data2: 0x7B4D, data3: 0x4C8E,
+    data4: [0xA1, 0x2F, 0x63, 0xD9, 0x0B, 0x44, 0x71, 0x0C],
+};
+
 pub fn tray_add(hwnd: HWND, icon: HICON) {
     unsafe {
         let mut d = NOTIFYICONDATAW::default();
         d.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         d.hWnd = hwnd;
         d.uID = 1;
-        d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_GUID;
+        d.guidItem = TRAY_GUID;
         d.uCallbackMessage = WM_APP_TRAY;
         d.hIcon = icon;
         let tip = wide("ProperDim");
@@ -108,7 +123,7 @@ pub fn tray_remove(hwnd: HWND) {
     unsafe {
         let mut d = NOTIFYICONDATAW::default();
         d.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        d.hWnd = hwnd; d.uID = 1;
+        d.hWnd = hwnd; d.uID = 1; d.uFlags = NIF_GUID; d.guidItem = TRAY_GUID;
         Shell_NotifyIconW(NIM_DELETE, &mut d);
     }
     app().tray_added = false;
@@ -117,7 +132,7 @@ pub fn tray_tip(hwnd: HWND, text: &str) {
     unsafe {
         let mut d = NOTIFYICONDATAW::default();
         d.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        d.hWnd = hwnd; d.uID = 1; d.uFlags = NIF_TIP;
+        d.hWnd = hwnd; d.uID = 1; d.uFlags = NIF_TIP | NIF_GUID; d.guidItem = TRAY_GUID;
         let t = wide(text);
         for (i, c) in t.iter().take(127).enumerate() { d.szTip[i] = *c; }
         Shell_NotifyIconW(NIM_MODIFY, &mut d);
@@ -178,12 +193,20 @@ pub fn handle_tray_msg(lparam: LPARAM) {
             if swap { ui::panels::toggle_tray_menu(); } else { toggle_control_panel(); }
         }
         _ => {
-            // Apps 键 / Shift+F10 由键盘触发的上下文菜单
+            // 对应 MessageWindow.KeyboardEventReceived：Apps / Shift+F10 / Enter / Space
             unsafe {
                 let apps = GetAsyncKeyState(VK_APPS);
                 let shift = GetAsyncKeyState(VK_SHIFT);
                 let f10 = GetAsyncKeyState(VK_F10);
-                if apps != 0 || (shift != 0 && f10 != 0) { show_native_menu(a.hwnd_controller); }
+                let enter = GetAsyncKeyState(VK_RETURN);
+                let space = GetAsyncKeyState(VK_SPACE);
+                let right = apps != 0 || (shift != 0 && f10 != 0);
+                let action = enter != 0 || space != 0;
+                if right {
+                    if swap { toggle_control_panel(); } else { show_native_menu(a.hwnd_controller); }
+                } else if action {
+                    if swap { ui::panels::toggle_tray_menu(); } else { toggle_control_panel(); }
+                }
             }
         }
     }
@@ -351,40 +374,71 @@ pub fn schedule_tick() {
     }
 }
 
-/// 对应 `EvaluateMissedSchedules()`：回溯 7 天找最近一次应触发而未触发的事件。
+/// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant 算法），用于比较 `DateTime`。
+fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let mp = m as i32 + if m > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146097 + doe - 719468) as i64
+}
+/// 解析 C# `DateTime` 的 ISO 字符串为总分钟数；MinValue 返回 i64::MIN。
+fn iso_minutes(s: &str) -> i64 {
+    let n: Vec<i64> = s.split(|c: char| !c.is_ascii_digit())
+        .filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect();
+    if n.len() < 5 { return i64::MIN; }
+    if n[0] <= 1 { return i64::MIN; }
+    days_from_civil(n[0] as i32, n[1] as u32, n[2] as u32) * 1440 + n[3] * 60 + n[4]
+}
+fn now_iso(st: &SYSTEMTIME) -> String {
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond)
+}
+
+/// 1:1 对应 `MainWindow.EvaluateMissedSchedules()`：回溯 7 天、逐条比对 LastTriggered。
 pub fn evaluate_missed_schedules(animate: bool) {
+    let st = local_now();
+    let now_day = days_from_civil(st.wYear as i32, st.wMonth as u32, st.wDay as u32);
+    let now_m = now_day * 1440 + (st.wHour as i64) * 60 + st.wMinute as i64;
     let a = app();
     if !a.settings.schedule_toggle || a.settings.saved_schedules.is_empty() {
         let v = a.settings.last_opacity;
         apply_brightness(v, animate, false, 1500, false);
         return;
     }
-    let st = local_now();
-    let dow = st.wDayOfWeek as i32;
-    let mut best: Option<(i32, i32, usize)> = None;
-    for (i, s) in a.settings.saved_schedules.iter().enumerate() {
+    let dow = st.wDayOfWeek as usize;
+    let mut most_recent_target: i64 = i64::MIN;
+    let mut most_recent_missed: Option<usize> = None;
+    for i in 0..a.settings.saved_schedules.len() {
+        let s = &mut a.settings.saved_schedules[i];
+        // 自修复：防止新建 schedule 无限向后看
+        if iso_minutes(&s.last_triggered) == i64::MIN { s.last_triggered = now_iso(&st); }
         if s.days.is_empty() { continue; }
         for back in 0..7i32 {
-            let d = ((dow - back).rem_euclid(7)) as usize;
+            let d = ((dow as i32 - back).rem_euclid(7)) as usize;
             if s.days.contains(DimSchedule::full_days()[d]) || s.days.contains(DimSchedule::short_days()[d]) {
-                let mins = (s.time.0 as i32) * 60 + s.time.1 as i32;
-                let now_mins = (st.wHour as i32) * 60 + st.wMinute as i32;
-                if back > 0 || mins <= now_mins {
-                    let score = back * 1440 - mins;
-                    if best.map(|(b, _, _)| score < b).unwrap_or(true) { best = Some((score, mins, i)); }
+                let target_m = (now_day - back as i64) * 1440
+                    + (s.time.0 as i64) * 60 + s.time.1 as i64;
+                if target_m <= now_m && target_m > most_recent_target {
+                    most_recent_target = target_m;
+                    most_recent_missed = if iso_minutes(&s.last_triggered) < target_m { Some(i) } else { None };
                 }
                 break;
             }
         }
     }
     let a = app();
-    if let Some((_, _, i)) = best {
+    if let Some(i) = most_recent_missed {
         let v = a.settings.saved_schedules[i].brightness;
+        a.settings.saved_schedules[i].last_triggered = now_iso(&st);
         a.settings.last_opacity = v;
-        a.settings.saved_schedules[i].last_triggered = format!("{:04}-{:02}-{:02}T{:02}:{:02}:00",
-            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
         config::save(&a.settings);
         apply_brightness(v, animate, false, 1500, false);
+        if a.hwnd_panel != NULL {
+            unsafe { InvalidateRect(a.hwnd_panel, std::ptr::null(), FALSE); }
+        }
     } else {
         let v = a.settings.last_opacity;
         apply_brightness(v, animate, false, 1500, false);
@@ -408,6 +462,19 @@ pub fn handle_timer(id: usize) {
         }
         TIMER_WATCHDOG => app().backend.watchdog_tick(),
         TIMER_ANIM => anim_tick(),
+        TIMER_SESSION_UNLOCK => {
+            let a = app();
+            unsafe { KillTimer(a.hwnd_controller, TIMER_SESSION_UNLOCK); }
+            a.monitors = a.backend.refresh_monitors();
+            a.last_hardware = a.locked_hardware;
+            refresh_tray_icon();
+            evaluate_missed_schedules(true);
+        }
+        TIMER_POWER_RESUME => {
+            let a = app();
+            unsafe { KillTimer(a.hwnd_controller, TIMER_POWER_RESUME); }
+            a.monitors = a.backend.refresh_monitors();
+        }
         _ => {}
     }
 }
@@ -439,4 +506,191 @@ pub fn open_url(url: &str) {
     let u = wide(url);
     let op = wide("open");
     unsafe { ShellExecuteW(NULL, op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL); }
+}
+
+// ---------------------------------------------------------------------------
+// 1:1 补齐：帮助文件 / 托盘定位 / 溢出窗口 / 全局钩子 / 会话与电源
+// ---------------------------------------------------------------------------
+pub fn readme_path() -> std::path::PathBuf {
+    let exe = std::env::current_exe().ok();
+    let dir = exe.and_then(|e| e.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    dir.join("ProperDim_README.txt")
+}
+/// 对应 csproj 的 `CopyToOutputDirectory=Always`：首次运行把内嵌帮助文件落到 exe 同目录。
+pub fn ensure_readme() {
+    let p = readme_path();
+    if !p.exists() { let _ = std::fs::write(&p, README_TXT); }
+}
+
+pub fn tray_modify_icon(hwnd: HWND, icon: HICON) {
+    unsafe {
+        let mut d = NOTIFYICONDATAW::default();
+        d.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        d.hWnd = hwnd; d.uID = 1; d.uFlags = NIF_ICON | NIF_GUID;
+        d.guidItem = TRAY_GUID; d.hIcon = icon;
+        Shell_NotifyIconW(NIM_MODIFY, &mut d);
+    }
+}
+/// 对应 SessionUnlock 时重建托盘图标。
+pub fn refresh_tray_icon() {
+    let icon = make_icon();
+    if icon == NULL { return; }
+    let a = app();
+    let old = a.icon;
+    a.icon = icon;
+    tray_modify_icon(a.hwnd_controller, icon);
+    if old != NULL && old != icon { unsafe { DestroyIcon(old); } }
+}
+
+/// 对应 `MainWindow.GetTrayIconScreenPosition()`：Shell_NotifyIconGetRect + uID 重试，
+/// 失败回退到光标位置。返回物理屏幕坐标。
+pub fn tray_icon_position() -> POINT {
+    let a = app();
+    let hwnd = a.hwnd_controller;
+    unsafe {
+        let mut id = NOTIFYICONIDENTIFIER::default();
+        id.cb_size = std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32;
+        id.hwnd = hwnd; id.uid = 0; id.guid_item = TRAY_GUID;
+        let mut r = RECT::default();
+        let mut found = Shell_NotifyIconGetRect(&id, &mut r) == 0;
+        if !found {
+            // 对应原版的三组重试：uid + GUID、uid + 备用 GUID、uid + Guid.Empty
+            for with_guid in [true, false] {
+                for i in 0..=10u32 {
+                    id.uid = i;
+                    id.guid_item = if with_guid { TRAY_GUID } else { GUID::default() };
+                    if Shell_NotifyIconGetRect(&id, &mut r) == 0 { found = true; break; }
+                }
+                if found { break; }
+            }
+        }
+        if found {
+            return POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+        }
+        let mut p = POINT::default();
+        GetCursorPos(&mut p);
+        p
+    }
+}
+
+/// 对应 `CheckAndCloseOverflow`：菜单隐藏后若光标已离开托盘溢出窗口则关掉它。
+pub fn check_and_close_overflow() {
+    unsafe {
+        let mut pos = POINT::default();
+        GetCursorPos(&mut pos);
+        for cls in ["NotifyIconOverflowWindow", "TopLevelWindowForOverflowDropShadow"] {
+            let n = wide(cls);
+            let hwnd = FindWindowW(n.as_ptr(), std::ptr::null());
+            if hwnd != NULL && IsWindowVisible(hwnd) != 0 {
+                let mut r = RECT::default();
+                if GetWindowRect(hwnd, &mut r) != 0 {
+                    if pos.x < r.left || pos.x > r.right || pos.y < r.top || pos.y > r.bottom {
+                        ShowWindow(hwnd, SW_HIDE);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 1:1 对应 `TrayMenuWindow.HookCallback`：QuickDim 显示时全局滚轮调亮度并吞掉消息。
+pub unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= HC_ACTION && wparam == WM_MOUSEWHEEL_HOOK as usize {
+        let hs = &*(lparam as *const MSLLHOOKSTRUCT);
+        let delta = ((hs.mouse_data >> 16) & 0xFFFF) as u16 as i16 as i32;
+        let a = app();
+        if a.hwnd_tray_menu != NULL && IsWindowVisible(a.hwnd_tray_menu) != 0 {
+            let cur = (a.current_brightness * 100.0).round() as i32;
+            let fine = GetAsyncKeyState(VK_CONTROL) != 0 || GetAsyncKeyState(0x02) != 0;
+            let mut np = if fine {
+                if delta > 0 { cur + 1 } else { cur - 1 }
+            } else if delta > 0 {
+                let n = ((cur + 4) / 5) * 5;
+                if n == cur { n + 5 } else { n }
+            } else { ((cur - 1) / 5) * 5 };
+            np = np.clamp(1, 100);
+            let v = np as f64 / 100.0;
+            a.settings.last_opacity = v;
+            trigger_save();
+            apply_brightness(v, false, false, 0, false);
+            return 1;
+        }
+    }
+    let h = app().hook;
+    CallNextHookEx(h, code, wparam, lparam)
+}
+pub fn install_mouse_hook() {
+    let a = app();
+    if a.hook != NULL { return; }
+    let fp: unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT = mouse_hook;
+    unsafe { a.hook = SetWindowsHookExW(WH_MOUSE_LL, fp as *const c_void, NULL as HINSTANCE, 0); }
+}
+pub fn remove_mouse_hook() {
+    let a = app();
+    if a.hook != NULL {
+        unsafe { UnhookWindowsHookEx(a.hook); }
+        a.hook = NULL;
+    }
+}
+
+pub fn register_session_notification(hwnd: HWND) {
+    let a = app();
+    if let Some(f) = a.extra.wts_register {
+        unsafe { if f(hwnd, NOTIFY_FOR_THIS_SESSION) != 0 { a.wts_registered = true; } }
+    }
+}
+pub fn unregister_session_notification(hwnd: HWND) {
+    let a = app();
+    if a.wts_registered {
+        if let Some(f) = a.extra.wts_unregister { unsafe { f(hwnd); } }
+        a.wts_registered = false;
+    }
+}
+
+/// 对应 `SystemEvents_SessionSwitch`（Lock 记录 / Unlock 延迟 1 秒恢复）。
+pub fn handle_session_change(wparam: WPARAM) {
+    match wparam {
+        WTS_SESSION_LOCK => { let a = app(); a.locked_hardware = a.last_hardware; }
+        WTS_SESSION_UNLOCK => {
+            let a = app();
+            unsafe { SetTimer(a.hwnd_controller, TIMER_SESSION_UNLOCK, 1000, std::ptr::null()); }
+        }
+        _ => {}
+    }
+}
+/// 对应 `SystemEvents_PowerModeChanged`。
+pub fn handle_power(wparam: WPARAM) {
+    match wparam {
+        PBT_APMSUSPEND => { let a = app(); a.locked_hardware = a.last_hardware; }
+        PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => {
+            let a = app();
+            unsafe { SetTimer(a.hwnd_controller, TIMER_POWER_RESUME, 1000, std::ptr::null()); }
+        }
+        _ => {}
+    }
+}
+/// 对应 `App.OnSessionEnding` → EmergencyReset + Exit。
+pub fn handle_end_session() {
+    let a = app();
+    config::save(&a.settings);
+    a.backend.shutdown();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn civil_date_math() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(2026, 11, 9) - days_from_civil(2026, 11, 8), 1);
+        assert_eq!(days_from_civil(2024, 2, 29) - days_from_civil(2024, 2, 28), 1);
+    }
+    #[test]
+    fn iso_minutes_handles_minvalue() {
+        assert_eq!(iso_minutes("0001-01-01T00:00:00"), i64::MIN);
+        assert_eq!(iso_minutes("1970-01-01T00:00:00"), 0);
+        assert_eq!(iso_minutes("1970-01-02T01:02:00"), 1502);
+    }
 }

@@ -6,6 +6,7 @@
 
 use crate::native::*;
 use std::collections::HashMap;
+use std::ffi::c_void;
 
 #[derive(Clone, Debug)]
 pub struct MonitorInfo {
@@ -26,6 +27,8 @@ pub trait Backend {
     fn register_hotkeys(&mut self, hwnd: HWND, enabled: bool, inc: &str, dec: &str);
     fn watchdog_tick(&mut self);
     fn shutdown(&mut self);
+    /// 卸载器复位：无条件下发 gamma=1.0 与单位颜色矩阵（绕过 early-return）。
+    fn force_reset(&mut self);
     fn is_demo(&self) -> bool;
 }
 
@@ -138,8 +141,103 @@ impl Win32Backend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DisplayConfig：1:1 对应 MainWindow.GetMonitorFriendlyName / IsMonitorHdr
+// ---------------------------------------------------------------------------
+pub struct DisplayConfig {
+    pub paths: Vec<DISPLAYCONFIG_PATH_INFO>,
+}
+
+impl DisplayConfig {
+    pub fn query() -> Self {
+        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = Vec::new();
+        unsafe {
+            let mut path_count = 0u32;
+            let mut mode_count = 0u32;
+            if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count) != 0 {
+                return DisplayConfig { paths };
+            }
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+            paths.resize(path_count as usize, DISPLAYCONFIG_PATH_INFO::default());
+            let ok = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut path_count,
+                paths.as_mut_ptr(), &mut mode_count, modes.as_mut_ptr(), std::ptr::null_mut());
+            if ok != 0 { paths.clear(); }
+            else { paths.truncate(path_count as usize); }
+        }
+        DisplayConfig { paths }
+    }
+
+    /// 对应 `_parenthesesRegex` 与 `Generic PnP Monitor` 清理。
+    pub fn friendly_name(&self, device: &str) -> (String, String) {
+        let mut result = "Display".to_string();
+        let mut device_path = String::new();
+        for p in &self.paths {
+            unsafe {
+                let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+                src.header.kind = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                src.header.adapter_id = p.source_info.adapter_id;
+                src.header.id = p.source_info.id;
+                if DisplayConfigGetDeviceInfo(&mut src as *mut _ as *mut c_void) != 0 { continue; }
+                if from_wide_buf(&src.view_gdi_device_name) != device { continue; }
+
+                let mut tgt = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+                tgt.header.kind = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                tgt.header.size = std::mem::size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+                tgt.header.adapter_id = p.target_info.adapter_id;
+                tgt.header.id = p.target_info.id;
+                if DisplayConfigGetDeviceInfo(&mut tgt as *mut _ as *mut c_void) == 0 {
+                    device_path = from_wide_buf(&tgt.monitor_device_path);
+                    let raw = from_wide_buf(&tgt.monitor_friendly_device_name);
+                    if let (Some(a), Some(b)) = (raw.find('('), raw.rfind(')')) {
+                        if b > a + 1 {
+                            let inner = raw[a + 1..b].trim().to_string();
+                            if !inner.is_empty() { result = inner; }
+                        }
+                    } else {
+                        let clean = raw.replace("Generic PnP Monitor", "").replace("Generic Monitor", "").trim().to_string();
+                        result = if clean.is_empty() { raw.clone() } else { clean };
+                    }
+                }
+                break;
+            }
+        }
+        (result, device_path)
+    }
+
+    /// 对应 `IsMonitorHdr`：advancedColorInfo.value 的 bit 1。
+    pub fn is_hdr(&self, device: &str) -> bool {
+        for p in &self.paths {
+            unsafe {
+                let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+                src.header.kind = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                src.header.size = std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                src.header.adapter_id = p.source_info.adapter_id;
+                src.header.id = p.source_info.id;
+                if DisplayConfigGetDeviceInfo(&mut src as *mut _ as *mut c_void) != 0 { continue; }
+                if from_wide_buf(&src.view_gdi_device_name) != device { continue; }
+                let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
+                info.header.kind = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+                info.header.size = std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32;
+                info.header.adapter_id = p.target_info.adapter_id;
+                info.header.id = p.target_info.id;
+                if DisplayConfigGetDeviceInfo(&mut info as *mut _ as *mut c_void) == 0 {
+                    return (info.value & 2) != 0;
+                }
+                break;
+            }
+        }
+        false
+    }
+}
+
+pub struct EnumCtx {
+    pub out: Vec<MonitorInfo>,
+    pub cfg: DisplayConfig,
+}
+
 unsafe extern "system" fn enum_monitor_proc(hmon: HWND, _hdc: HDC, _r: *mut RECT, data: LPARAM) -> BOOL {
-    let out = &mut *(data as *mut Vec<MonitorInfo>);
+    let ctx = &mut *(data as *mut EnumCtx);
     let mut mi = MONITORINFOEXW::default();
     mi.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     if GetMonitorInfoW(hmon, &mut mi) == 0 { return TRUE; }
@@ -164,8 +262,10 @@ unsafe extern "system" fn enum_monitor_proc(hmon: HWND, _hdc: HDC, _r: *mut RECT
             monitor_id = from_wide_buf(&md.device_id);
         }
     }
+    let (nice, device_path) = ctx.cfg.friendly_name(&device);
+    let is_hdr = ctx.cfg.is_hdr(&device);
     let mut is_virtual = false;
-    for s in [&device, &adapter_string, &adapter_id, &monitor_string, &monitor_id] {
+    for s in [&device, &nice, &device_path, &adapter_string, &adapter_id, &monitor_string, &monitor_id] {
         let low = s.to_lowercase();
         if VIRTUAL_KEYWORDS.iter().any(|k| low.contains(k)) { is_virtual = true; break; }
     }
@@ -181,9 +281,10 @@ unsafe extern "system" fn enum_monitor_proc(hmon: HWND, _hdc: HDC, _r: *mut RECT
         gamma_supported = GetDeviceGammaRamp(d, &mut test) != 0;
         DeleteDC(d);
     }
-    out.push(MonitorInfo {
-        handle: hmon, device_name: device.clone(), friendly_name: friendly_name(&device, &adapter_string),
-        gamma_supported: gamma_supported && !is_virtual, is_primary: primary, is_hdr: false,
+    ctx.out.push(MonitorInfo {
+        handle: hmon, device_name: device.clone(),
+        friendly_name: if nice.is_empty() { friendly_name(&device, &adapter_string) } else { nice },
+        gamma_supported: gamma_supported && !is_virtual, is_primary: primary, is_hdr,
     });
     TRUE
 }
@@ -210,9 +311,17 @@ fn parse_hotkey(s: &str, id: i32) -> Option<(u32, u32)> {
                     "up" => 0x26, "down" => 0x28, "left" => 0x25, "right" => 0x27,
                     "space" => 0x20, "enter" => 0x0D, "tab" => 0x09, "escape" | "esc" => 0x1B,
                     "home" => 0x24, "end" => 0x23, "pageup" => 0x21, "pagedown" => 0x22,
-                    "insert" => 0x2D, "delete" => 0x2E, "backspace" => 0x08,
-                    x if x.len() == 1 && x.as_bytes()[0].is_ascii_alphabetic() => x.as_bytes()[0].to_ascii_uppercase() as u32,
-                    x if x.len() == 1 && x.as_bytes()[0].is_ascii_digit() => x.as_bytes()[0] as u32,
+            "insert" => 0x2D, "delete" => 0x2E, "backspace" => 0x08,
+            "return" => 0x0D, "clear" => 0x0C, "pause" => 0x13,
+            "numlock" => 0x90, "scroll" => 0x91, "printscreen" => 0x2C,
+            "lwin" | "rwin" | "apps" => 0,
+            x if x.len() == 1 && x.as_bytes()[0].is_ascii_alphabetic() => x.as_bytes()[0].to_ascii_uppercase() as u32,
+            x if x.len() == 1 && x.as_bytes()[0].is_ascii_digit() => x.as_bytes()[0] as u32,
+            x if x.len() == 2 && (x.as_bytes()[0] == b'd' || x.as_bytes()[0] == b'D')
+                && x.as_bytes()[1].is_ascii_digit() => x.as_bytes()[1] as u32,
+            x if x.starts_with("numpad") && x.len() > 6 => {
+                if let Ok(n) = x[6..].parse::<u32>() { 0x60 + n } else { 0 }
+            }
                     x if x.starts_with('f') && x.len() > 1 => {
                         if let Ok(n) = x[1..].parse::<u32>() { 0x6F + n } else { 0 }
                     }
@@ -236,13 +345,13 @@ impl Backend for Win32Backend {
         self.set_magnification(hardware);
     }
     fn refresh_monitors(&mut self) -> Vec<MonitorInfo> {
-        let mut list: Vec<MonitorInfo> = Vec::new();
+        let mut ctx = EnumCtx { out: Vec::new(), cfg: DisplayConfig::query() };
         unsafe {
-            EnumDisplayMonitors(NULL, std::ptr::null(), Some(enum_monitor_proc), &mut list as *mut _ as LPARAM);
+            EnumDisplayMonitors(NULL, std::ptr::null(), Some(enum_monitor_proc), &mut ctx as *mut _ as LPARAM);
         }
-        if list.is_empty() { return self.monitors.clone(); }
-        self.monitors = list.clone();
-        list
+        if ctx.out.is_empty() { return self.monitors.clone(); }
+        self.monitors = ctx.out.clone();
+        ctx.out
     }
     fn resync_displays(&mut self) {
         let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
@@ -277,6 +386,37 @@ impl Backend for Win32Backend {
         }
         self.mag_ready = false;
     }
+    fn force_reset(&mut self) {
+        let names: Vec<String> = self.monitors.iter().map(|m| m.device_name.clone()).collect();
+        for n in &names {
+            unsafe {
+                let dcn = wide(&n);
+                let dc = CreateDCW(std::ptr::null(), dcn.as_ptr(), std::ptr::null(), std::ptr::null());
+                if dc != NULL {
+                    for i in 0..256 {
+                        let v = ((i as f64 / 255.0) * 65535.0) as u16;
+                        self.ramp.red[i] = v; self.ramp.green[i] = v; self.ramp.blue[i] = v;
+                    }
+                    SetDeviceGammaRamp(dc, &self.ramp);
+                    DeleteDC(dc);
+                }
+            }
+        }
+        unsafe {
+            if self.mag_ready {
+                if let Some(set) = self.mag.set_effect {
+                    let mut e = MAGCOLOREFFECT::default();
+                    e.transform = [1.0, 0.0, 0.0, 0.0, 0.0,
+                                   0.0, 1.0, 0.0, 0.0, 0.0,
+                                   0.0, 0.0, 1.0, 0.0, 0.0,
+                                   0.0, 0.0, 0.0, 1.0, 0.0,
+                                   0.0, 0.0, 0.0, 0.0, 1.0];
+                    set(&e);
+                }
+            }
+        }
+        self.current_mag_factor = 1.0;
+    }
     fn is_demo(&self) -> bool { false }
 }
 
@@ -302,9 +442,27 @@ impl Backend for StubBackend {
     fn register_hotkeys(&mut self, _h: HWND, _e: bool, _i: &str, _d: &str) {}
     fn watchdog_tick(&mut self) {}
     fn shutdown(&mut self) {}
+    fn force_reset(&mut self) { self.last_brightness = 1.0; }
     fn is_demo(&self) -> bool { true }
 }
 
 pub fn create_backend(demo: bool) -> Box<dyn Backend> {
     if demo { Box::new(StubBackend::new()) } else { Box::new(Win32Backend::new()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn hotkey_parsing() {
+        assert_eq!(parse_hotkey("Ctrl + Alt + Up", 1), Some((MOD_CONTROL | MOD_ALT, 0x26)));
+        assert_eq!(parse_hotkey("Ctrl + Shift + F5", 2), Some((MOD_CONTROL | MOD_SHIFT, 0x74)));
+        assert_eq!(parse_hotkey("Win + D1", 1), Some((MOD_WIN, b'1' as u32)));
+        assert_eq!(parse_hotkey("", 1), None);
+    }
+    #[test]
+    fn virtual_keywords_present() {
+        assert!(VIRTUAL_KEYWORDS.contains(&"spacedesk"));
+        assert!(VIRTUAL_KEYWORDS.contains(&"iddsample"));
+    }
 }
