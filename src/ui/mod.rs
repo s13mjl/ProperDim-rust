@@ -160,8 +160,21 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             dispatch(ctx, ev, hwnd);
             return 0;
         }
+        WM_LBUTTONDBLCLK => {
+            let x = lparam_x(lparam); let y = lparam_y(lparam);
+            if let Some(i) = ctx.ui.hit(x, y) {
+                let id = ctx.ui.widgets[i].id;
+                dispatch(ctx, Event::DoubleClick(id), hwnd);
+            }
+            return 0;
+        }
         WM_MOUSEMOVE => {
             let x = lparam_x(lparam); let y = lparam_y(lparam);
+            // 对应 PreviewButton_MouseLeave：按住预览时移出按钮即恢复
+            if app::app().preview_active {
+                let over = ctx.ui.widgets.iter().any(|ww| ww.tag == "preview" && ww.rect.contains(x, y));
+                if !over { app::stop_preview(); }
+            }
             let ev = ctx.ui.mouse_move(x, y);
             InvalidateRect(hwnd, std::ptr::null(), FALSE);
             dispatch(ctx, ev, hwnd);
@@ -177,7 +190,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             return 0;
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            if msg == WM_KEYDOWN && wparam as i32 == VK_ESCAPE && ctx.kind != WindowKind::Controller {
+            let vk = wparam as i32;
+            if msg == WM_KEYDOWN && vk == VK_ESCAPE && ctx.kind != WindowKind::Controller {
                 ShowWindow(hwnd, SW_HIDE);
                 return 0;
             }
@@ -189,12 +203,30 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
                     return 0;
                 }
             }
-            if wparam as i32 == VK_RETURN || wparam as i32 == VK_SPACE {
-                if let Some(id) = ctx.ui.focus {
-                    dispatch(ctx, Event::Click(id), hwnd);
-                    return 0;
+            // 对应 App.xaml.cs 的 RegisterClassHandler：CheckBox(Enter) / Hyperlink(Enter+Space)
+            if (vk == VK_RETURN || vk == VK_SPACE) && ctx.ui.focus.is_none() {
+                if let Some(id) = ctx.ui.hover {
+                    if let Some(k) = ctx.ui.get(id).map(|w| w.kind.clone()) {
+                        match k {
+                            Kind::CheckBox(_, b) | Kind::DayBox(_, b) => {
+                                dispatch(ctx, Event::Check(id, !b), hwnd); return 0;
+                            }
+                            Kind::Link(..) => { dispatch(ctx, Event::Click(id), hwnd); return 0; }
+                            _ => {}
+                        }
+                    }
                 }
             }
+            if (vk == VK_RETURN || vk == VK_SPACE) && ctx.ui.focus.is_some() {
+                let id = ctx.ui.focus.unwrap();
+                dispatch(ctx, Event::Click(id), hwnd);
+                return 0;
+            }
+            dispatch(ctx, Event::Key(0, vk), hwnd);
+            return 0;
+        }
+        WM_KEYUP => {
+            if app::app().preview_active { app::stop_preview(); }
             return 0;
         }
         WM_CHAR => {
@@ -237,13 +269,33 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         WM_SIZE => {
             let w = loword(lparam as usize); let h = hiword(lparam as usize);
             theme::apply_round_region(hwnd, w, h, s(8));
-            // 对应 Window_SizeChanged：持久化窗口尺寸
-            if ctx.kind == WindowKind::ControlPanel {
-                let sc = app::app().scale;
-                let a = app::app();
-                a.settings.control_panel_width = (w as f64 / sc).round();
-                a.settings.control_panel_height = (h as f64 / sc).round();
-                app::trigger_save();
+            // 对应各窗口的 Window_SizeChanged：持久化尺寸
+            let sc = app::app().scale;
+            let lw = (w as f64 / sc).round();
+            let lh = (h as f64 / sc).round();
+            let a = app::app();
+            match ctx.kind {
+                WindowKind::ControlPanel => {
+                    a.settings.control_panel_width = lw; a.settings.control_panel_height = lh;
+                    app::trigger_save();
+                }
+                WindowKind::ScheduleDialog => {
+                    a.settings.schedule_dialog_width = lw; a.settings.schedule_dialog_height = lh;
+                    app::trigger_save();
+                }
+                WindowKind::MinDialog => {
+                    a.settings.min_brightness_dialog_width = lw; a.settings.min_brightness_dialog_height = lh;
+                    app::trigger_save();
+                }
+                WindowKind::InfoWindow => {
+                    a.settings.app_info_window_width = lw; a.settings.app_info_window_height = lh;
+                    app::trigger_save();
+                }
+                WindowKind::Warning => {
+                    a.settings.warning_message_width = lw; a.settings.warning_message_height = lh;
+                    app::trigger_save();
+                }
+                _ => {}
             }
             relayout(ctx, w, h);
             return 0;

@@ -62,6 +62,18 @@ fn center_window(hwnd: HWND, w: i32, h: i32) {
             w, h, SWP_NOACTIVATE);
     }
 }
+/// 对应各窗口的 `ApplySavedSize()`：读取持久化的窗口尺寸。
+fn saved_size(kind: WindowKind) -> (i32, i32) {
+    let s = &app::app().settings;
+    match kind {
+        WindowKind::ScheduleDialog => (s.schedule_dialog_width as i32, s.schedule_dialog_height as i32),
+        WindowKind::MinDialog => (s.min_brightness_dialog_width as i32, s.min_brightness_dialog_height as i32),
+        WindowKind::InfoWindow => (s.app_info_window_width as i32, s.app_info_window_height as i32),
+        WindowKind::Warning => (s.warning_message_width as i32, s.warning_message_height as i32),
+        _ => (320, 280),
+    }
+}
+
 fn show_or_create(slot: &mut HWND, cls_name: &str, title: &str, cw: i32, ch: i32, make: impl FnOnce() -> WindowCtx) {
     let cls = ui::register_class(cls_name);
     if *slot == NULL {
@@ -107,7 +119,8 @@ pub fn show_schedule(edit: Option<usize>) {
         }
     }
     let hwnd = &mut app::app().hwnd_schedule as *mut HWND;
-    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustSchedule", "Event Scheduler", SCH_W, SCH_H,
+    let (cw, ch) = saved_size(WindowKind::ScheduleDialog);
+    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustSchedule", "Event Scheduler", cw, ch,
         || { let mut c = WindowCtx::new(WindowKind::ScheduleDialog, "Event Scheduler", true); c.bg = c::BG; c.resizable = true; c.min_w = s(320); c.min_h = s(280); c });
 }
 
@@ -140,6 +153,7 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.widgets.push(mk(ID_SCH_SLIDER, 20, 134, 240, 24,
         Kind::Slider { min: 0.01, max: 1.0, value: brightness, vertical: false }));
     ctx.ui.widgets.push(mk(ID_SCH_PREVIEW, 266, 136, 24, 20, Kind::PreviewButton));
+    if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "preview".into(); }
 
     let mut days_label = mk(5, 0, 162, w, 18, Kind::Label("Days Active".into(), 12, c::LIGHT));
     days_label.tag = "center".into();
@@ -149,8 +163,17 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
         ctx.ui.widgets.push(mk(ID_SCH_DAY_BASE + i, 10 + i as i32 * 43, 184, 40, 20,
             Kind::DayBox(labels[i as usize].into(), days[i as usize])));
     }
-    ctx.ui.widgets.push(mk(ID_SCH_ADD, 95, 218, 130, 25,
-        Kind::Button(if editing { "Update Event".into() } else { "Add to Schedule".into() })));
+    // 对应 ValidateTime：时段冲突时把 Add 按钮改为提示文案并禁用（不是弹窗）
+    let actual_hour = if is24 { hour } else if pm { (hour % 12) + 12 } else { hour % 12 };
+    let conflict = app::app().settings.saved_schedules.iter().enumerate().any(|(i, sc)| {
+        sc.time == (actual_hour, minute) && Some(i) != app::app().edit_schedule_index
+    });
+    let label = if conflict { "Timeslot already scheduled".to_string() }
+        else if editing { "Update Event".into() } else { "Add to Schedule".into() };
+    let bw = if conflict { 200 } else { 130 };
+    let mut btn = mk(ID_SCH_ADD, (w - bw) / 2, 218, bw, 25, Kind::Button(label));
+    btn.enabled = !conflict;
+    ctx.ui.widgets.push(btn);
     ctx.ui.widgets.push(mk(999, w - 14, 274, 12, 12, Kind::ResizeGrip));
 }
 
@@ -175,7 +198,7 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => {
             match id {
-                ID_CLOSE => unsafe { ShowWindow(hwnd, SW_HIDE); },
+                ID_CLOSE => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); },
                 ID_SCH_HOUR => {
                     let (h, m) = unsafe { SCH_TIME };
                     let is24 = unsafe { SCH_24H };
@@ -222,6 +245,9 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         Event::Value(id, v) => {
             if id == ID_SCH_SLIDER { unsafe { SCH_BRIGHTNESS = v; } relayout_hwnd(ctx, hwnd); }
         }
+        Event::Key(_, vk) if vk == VK_RETURN || vk == VK_SPACE => {
+            app::start_preview(ctx.ui.value(ID_SCH_SLIDER));
+        }
         _ => {}
     }
 }
@@ -235,7 +261,7 @@ fn relayout_hwnd(ctx: &mut WindowCtx, hwnd: HWND) {
 fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     let (time, pm, is24, brightness, days) = unsafe { (SCH_TIME, SCH_PM, SCH_24H, SCH_BRIGHTNESS, SCH_DAYS) };
     if !days.iter().any(|b| *b) {
-        show_warning("Missing Event Information", "You forgot to select the event days!", true, "OK", WarningAction::None);
+        show_warning("Missing Event Information", "You forgot to select the event days!", true, "Oops", WarningAction::None);
         return;
     }
     let mut hour = time.0;
@@ -253,12 +279,10 @@ fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     let duplicate = a.settings.saved_schedules.iter().enumerate().any(|(i, sc)| {
         sc.time == time && Some(i) != a.edit_schedule_index
     });
-    if duplicate {
-        show_warning("Timeslot already scheduled", "Timeslot already scheduled", true, "OK", WarningAction::None);
-        return;
-    }
+    // 上游通过 ValidateTime 禁用 Add 按钮；这里保留一道静默防线
+    if duplicate { return; }
     let sc = DimSchedule {
-        time, brightness, days: if all { String::new() } else { day_str },
+        time, brightness, days: if all { String::new() } else { day_str.clone() },
         last_triggered: "0001-01-01T00:00:00".into(),
     };
     if let Some(i) = a.edit_schedule_index {
@@ -267,6 +291,8 @@ fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
         a.settings.saved_schedules.push(sc);
     }
     a.settings.saved_schedules.sort_by_key(|x| (x.time.0, x.time.1));
+    // 对应 ScheduleDialog.xaml.cs:473 保存本次选择的星期
+    a.settings.last_schedule_days = if all { "Mo,Tu,We,Th,Fr,Sa,Su".into() } else { day_str };
     a.edit_schedule_index = None;
     config::save(&a.settings);
     unsafe { ShowWindow(hwnd, SW_HIDE); }
@@ -290,7 +316,8 @@ fn refresh_panel() {
 pub fn show_min() {
     unsafe { MIN_VALUE = app::app().settings.global_minimum; }
     let hwnd = &mut app::app().hwnd_min as *mut HWND;
-    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustMin", "ProperDim", MIN_W, MIN_H,
+    let (cw, ch) = saved_size(WindowKind::MinDialog);
+    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustMin", "ProperDim", cw, ch,
         || { let mut c = WindowCtx::new(WindowKind::MinDialog, "Adjust Minimum Brightness", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(260); c });
 }
 
@@ -299,7 +326,7 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.clear();
     ctx.ui.widgets.push(mk(ID_CLOSE, w - 45, 0, 45, 30, Kind::CloseButton("✕".into())));
     let mut intro = mk(1, 15, 34, w - 30, 34,
-        Kind::Label("Set the darkest brightness the slider can reach. Preview before you commit.".into(), 11, c::MUTED));
+        Kind::Label("Adjust the slider below to set the absolute minimum brightness.".into(), 11, c::MUTED));
     intro.tag = "wrap_center".into();
     ctx.ui.widgets.push(intro);
     ctx.ui.widgets.push(mk(2, 40, 76, 150, 20,
@@ -309,8 +336,9 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.widgets.push(mk(ID_MIN_SLIDER, 15, 102, 230, 24,
         Kind::Slider { min: 0.01, max: 0.40, value: v, vertical: false }));
     ctx.ui.widgets.push(mk(ID_MIN_PREVIEW, 252, 104, 24, 20, Kind::PreviewButton));
+    if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "preview".into(); }
     let mut note = mk(4, 15, 132, w - 30, 52,
-        Kind::Label("Take care not to black out your screen. Enable Hotkeys so you can always raise the brightness again.".into(), 11, c::MUTED));
+        Kind::Label("TIP: Enable hotkeys before saving changes here so you can't accidentally blackout your screen.".into(), 11, c::MUTED));
     note.tag = "wrap_center".into();
     ctx.ui.widgets.push(note);
     ctx.ui.widgets.push(mk(ID_MIN_OK, 40, 198, 100, 25, Kind::Button("Looks good".into())));
@@ -321,7 +349,7 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
 pub fn on_min(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => match id {
-            ID_CLOSE | ID_MIN_CANCEL => unsafe { ShowWindow(hwnd, SW_HIDE); },
+            ID_CLOSE | ID_MIN_CANCEL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); },
             ID_MIN_PREVIEW => app::start_preview(unsafe { MIN_VALUE }),
             ID_MIN_OK => {
                 let v = unsafe { MIN_VALUE };
@@ -335,6 +363,9 @@ pub fn on_min(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             _ => {}
         },
         Event::Value(id, v) => { if id == ID_MIN_SLIDER { unsafe { MIN_VALUE = v; } relayout_hwnd(ctx, hwnd); } }
+        Event::Key(_, vk) if vk == VK_RETURN || vk == VK_SPACE => {
+            app::start_preview(unsafe { MIN_VALUE });
+        }
         _ => {}
     }
 }
@@ -351,7 +382,8 @@ const INFO_URLS: &[&str] = &[
 
 pub fn show_info() {
     let hwnd = &mut app::app().hwnd_info as *mut HWND;
-    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustInfo", "ProperDim Info", INFO_W, INFO_H,
+    let (cw, ch) = saved_size(WindowKind::InfoWindow);
+    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustInfo", "ProperDim Info", cw, ch,
         || { let mut c = WindowCtx::new(WindowKind::InfoWindow, "ProperDim Info", true); c.bg = c::INFO_BG; c.resizable = true; c.min_w = s(320); c.min_h = s(394); c });
 }
 
@@ -400,7 +432,7 @@ pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
 pub fn on_info(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     if let Event::Click(id) = ev {
         match id {
-            ID_CLOSE | ID_INFO_COOL => unsafe { ShowWindow(hwnd, SW_HIDE); },
+            ID_CLOSE | ID_INFO_COOL => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::trigger_save(); },
             ID_INFO_HELP => {
                 let path = app::readme_path();
                 let s = wide(&path.to_string_lossy());
@@ -436,7 +468,8 @@ pub fn show_warning(title: &str, message: &str, ok_only: bool, custom: &str, act
     a.warning_action = action;
     a.warning_result = None;
     let hwnd = &mut a.hwnd_warning as *mut HWND;
-    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustWarning", title, WARN_W, WARN_H,
+    let (cw, ch) = saved_size(WindowKind::Warning);
+    show_or_create(unsafe { &mut *hwnd }, "ProperDimRustWarning", title, cw, ch,
         || { let mut c = WindowCtx::new(WindowKind::Warning, "", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(150); c });
 }
 

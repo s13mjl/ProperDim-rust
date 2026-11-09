@@ -50,6 +50,10 @@ pub struct App {
     pub is_shutting_down: bool,
     pub preview_active: bool,
     pub preview_restore: f64,
+    /// 对应 ControlPanel._isPreviewActive：预览期间阻止滑块被全局亮度回写覆盖。
+    pub preview_isolated: bool,
+    /// 对应 ControlPanel._lastUserInteraction（500ms 内不强制同步滑块）。
+    pub last_user_interaction: u64,
     pub save_pending: bool,
     pub edit_schedule_index: Option<usize>,
     pub warning_action: WarningAction,
@@ -220,6 +224,8 @@ pub fn show_control_panel() {
     if a.hwnd_panel == NULL { a.hwnd_panel = ui::panels::create_control_panel(a.instance); }
     let h = a.hwnd_panel;
     if h == NULL { return; }
+    // 对应 ControlPanel_IsVisibleChanged / SyncSliderWithOpacity：显示时同步滑块
+    ui::panels::sync_brightness(h, a.current_brightness);
     unsafe { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); InvalidateRect(h, std::ptr::null(), FALSE); }
 }
 pub fn toggle_control_panel() {
@@ -231,11 +237,16 @@ pub fn toggle_control_panel() {
         unsafe { ShowWindow(a.hwnd_panel, SW_HIDE); }
     } else { show_control_panel(); }
 }
-pub fn hide_control_panel(minimize_to_tray: bool) {
+pub fn hide_control_panel(handle_closure: bool) {
     let a = app();
+    // 对应 ControlPanel.HandleClosure：CloseToTray=false 时真正退出并解绑事件
+    if handle_closure && !a.settings.close_to_tray {
+        shutdown_app();
+        return;
+    }
     if a.hwnd_panel != NULL {
         unsafe { ShowWindow(a.hwnd_panel, SW_HIDE); }
-        if !minimize_to_tray { /* 对应 CloseToTray=false：仍然只隐藏，由 Exit 菜单退出 */ }
+        if handle_closure { ui::panels::reset_panel_state(a.hwnd_panel); }
     }
 }
 
@@ -266,11 +277,13 @@ pub fn apply_brightness(logical: f64, animate: bool, ignore_minimum: bool, durat
     };
     set_tooltip_brightness();
     if a.hwnd_panel != NULL {
-        ui::panels::sync_brightness(a.hwnd_panel, l);
+        if !a.preview_isolated && now_ms() - a.last_user_interaction >= 500 {
+            ui::panels::sync_brightness(a.hwnd_panel, l);
+        }
         unsafe { InvalidateRect(a.hwnd_panel, std::ptr::null(), FALSE); }
     }
     if a.hwnd_tray_menu != NULL {
-        ui::panels::sync_brightness(a.hwnd_tray_menu, l);
+        if !a.preview_isolated { ui::panels::sync_brightness(a.hwnd_tray_menu, l); }
         unsafe { InvalidateRect(a.hwnd_tray_menu, std::ptr::null(), FALSE); }
     }
 }
@@ -321,12 +334,14 @@ pub fn start_preview(v: f64) {
     let a = app();
     if !a.preview_active { a.preview_restore = a.current_brightness; }
     a.preview_active = true;
+    a.preview_isolated = true;
     a.backend.set_preview(v);
 }
 pub fn stop_preview() {
     let a = app();
     if !a.preview_active { return; }
     a.preview_active = false;
+    a.preview_isolated = false;
     let restore = a.preview_restore;
     let min = a.settings.global_minimum;
     a.backend.restore_preview(restore, min);
@@ -505,7 +520,12 @@ pub fn shutdown_app() {
 pub fn open_url(url: &str) {
     let u = wide(url);
     let op = wide("open");
-    unsafe { ShellExecuteW(NULL, op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL); }
+    let r = unsafe { ShellExecuteW(NULL, op.as_ptr(), u.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+    // 对应 Hyperlink_RequestNavigate 的失败提示
+    if (r as isize) <= 32 {
+        ui::dialogs::show_warning("Error", &format!("Unable to open link: {}", url),
+            true, "OK", WarningAction::None);
+    }
 }
 
 // ---------------------------------------------------------------------------

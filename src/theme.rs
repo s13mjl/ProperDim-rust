@@ -202,6 +202,8 @@ pub enum Event {
     Value(u32, f64),
     Text(u32, String),
     Wheel(u32, i32),
+    DoubleClick(u32),
+    Key(u32, i32),
     None,
 }
 
@@ -210,10 +212,18 @@ pub struct Ui {
     pub capture: Option<u32>,
     pub hover: Option<u32>,
     pub focus: Option<u32>,
+    pub scroll_offset: i32,
+    pub selected_row: Option<usize>,
 }
 impl Ui {
-    pub fn new() -> Self { Ui { widgets: Vec::new(), capture: None, hover: None, focus: None } }
-    pub fn clear(&mut self) { self.widgets.clear(); self.hover = None; self.focus = None; }
+    pub fn new() -> Self {
+        Ui { widgets: Vec::new(), capture: None, hover: None, focus: None,
+            scroll_offset: 0, selected_row: None }
+    }
+    pub fn clear(&mut self) {
+        self.widgets.clear(); self.hover = None; self.focus = None;
+        self.scroll_offset = 0; self.selected_row = None;
+    }
     pub fn get(&self, id: u32) -> Option<&Widget> { self.widgets.iter().find(|w| w.id == id && w.visible) }
     pub fn get_mut(&mut self, id: u32) -> Option<&mut Widget> { self.widgets.iter_mut().find(|w| w.id == id) }
     pub fn set_value(&mut self, id: u32, v: f64) {

@@ -111,6 +111,7 @@ pub const VK_UP: i32 = 0x26;
 pub const VK_RIGHT: i32 = 0x27;
 pub const VK_DOWN: i32 = 0x28;
 pub const VK_ESCAPE: i32 = 0x1B;
+pub const VK_DELETE: i32 = 0x2E;
 pub const VK_F10: i32 = 0x79;
 pub const VK_APPS: i32 = 0x5D;
 pub const VK_SHIFT: i32 = 0x10;

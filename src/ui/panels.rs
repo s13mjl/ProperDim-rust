@@ -22,6 +22,7 @@ pub const ID_MIN_LINK: u32 = 46;
 pub const ID_SCHEDULE_CHECK: u32 = 50;
 pub const ID_ADD_SCHEDULE: u32 = 51;
 pub const ID_NO_SCHEDULES: u32 = 52;
+pub const ID_SCHEDULE_SCROLL: u32 = 55;
 pub const ID_ROW_BASE: u32 = 200;
 pub const ID_HOTKEY_CHECK: u32 = 60;
 pub const ID_INC_TEXT: u32 = 61;
@@ -97,6 +98,62 @@ pub fn create_control_panel(_instance: HINSTANCE) -> HWND {
         WS_EX_TOOLWINDOW, ctx, false)
 }
 
+/// 对应 `ControlPanel.RefreshList()`：计算未来 7 天内下次触发时间并据此排序。
+fn sorted_schedule_indices(list: &[config::DimSchedule]) -> Vec<usize> {
+    let mut st = SYSTEMTIME::default();
+    unsafe { GetLocalTime(&mut st); }
+    let now_m = (st.wHour as i64) * 60 + st.wMinute as i64;
+    let dow = st.wDayOfWeek as usize;
+    let mut keyed: Vec<(i64, usize)> = list.iter().enumerate().map(|(i, sc)| {
+        let mut key = i64::MAX;
+        for back in 0..=7i32 {
+            let d = ((dow as i32 + back).rem_euclid(7)) as usize;
+            if sc.days.contains(config::DimSchedule::short_days()[d]) {
+                let cand = back as i64 * 1440 + (sc.time.0 as i64) * 60 + sc.time.1 as i64;
+                if cand > now_m { key = cand; break; }
+            }
+        }
+        (key, i)
+    }).collect();
+    keyed.sort_by_key(|&(k, i)| (k, i));
+    keyed.into_iter().map(|(_, i)| i).collect()
+}
+
+/// 对应 `HandleClosure`：关闭时把 Tab 归零、日程列表滚回顶部。
+pub fn reset_panel_state(hwnd: HWND) {
+    if hwnd == NULL { return; }
+    unsafe { CURRENT_TAB = 0; }
+    let mut cr = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut cr); }
+    if let Some(ctx) = unsafe { (ui::get_ctx(hwnd) as *mut WindowCtx).as_mut() } {
+        ctx.ui.scroll_offset = 0;
+        ctx.ui.selected_row = None;
+        ui::relayout_public(ctx, cr.width(), cr.height());
+        unsafe { InvalidateRect(hwnd, std::ptr::null(), FALSE); }
+    }
+}
+
+fn set_tab(tab: u32, ctx: &mut WindowCtx, hwnd: HWND) {
+    unsafe { CURRENT_TAB = tab; }
+    let mut cr = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut cr); }
+    ui::relayout_public(ctx, cr.width(), cr.height());
+}
+
+fn row_real_index(ctx: &WindowCtx, id: u32) -> Option<usize> {
+    if id < ID_ROW_BASE { return None; }
+    let base = ID_ROW_BASE + ((id - ID_ROW_BASE) / 10) * 10;
+    ctx.ui.widgets.iter().find(|w| w.id == base)
+        .and_then(|w| w.tag.strip_prefix("row"))
+        .and_then(|s| s.parse::<usize>().ok())
+}
+
+fn relayout(ctx: &mut WindowCtx, hwnd: HWND) {
+    let mut cr = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut cr); }
+    ui::relayout_public(ctx, cr.width(), cr.height());
+}
+
 pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
     let tab = unsafe { CURRENT_TAB };
     let a = app::app();
@@ -135,35 +192,54 @@ pub fn layout_control_panel(ctx: &mut WindowCtx, w: i32, h: i32) {
                     Kind::Button((*label).into())));
             }
             ctx.ui.widgets.push(mk(ID_MIN_LINK, (w - 190) / 2, 136, 190, 18,
-                Kind::Link("Adjust Minimum Brightness".into(), c::MUTED)));
+                Kind::Link("Adjust Minimum".into(), c::MUTED)));
         }
         1 => {
+            let enabled = st.schedule_toggle;
             ctx.ui.widgets.push(mk(ID_SCHEDULE_CHECK, 10, 60, 170, 22,
-                Kind::CheckBox("Enable Schedule".into(), st.schedule_toggle)));
-            ctx.ui.widgets.push(mk(ID_ADD_SCHEDULE, w - 34, 60, 24, 24, Kind::Button("+".into())));
+                Kind::CheckBox("Enable Schedule".into(), enabled)));
+            let mut add = mk(ID_ADD_SCHEDULE, w - 34, 60, 24, 24, Kind::Button("+".into()));
+            add.enabled = enabled; // ToggleScheduleUI: 未启用时禁止交互
+            ctx.ui.widgets.push(add);
             if st.saved_schedules.is_empty() {
-                ctx.ui.widgets.push(mk(ID_NO_SCHEDULES, 10, 90, w - 20, h - 100,
-                    Kind::Label("No Schedules".into(), 11, c::DIM)));
-                ctx.ui.widgets.last_mut().unwrap().tag = "center".into();
+                let mut t = mk(ID_NO_SCHEDULES, 10, 90, w - 20, h - 100,
+                    Kind::Label("No Schedules".into(), 11, c::DIM));
+                t.tag = "center".into();
+                t.enabled = enabled;
+                ctx.ui.widgets.push(t);
             } else {
+                // 对应 RefreshList：按「下一次触发时间」排序，未来在上、无后续的排末尾
+                let order = sorted_schedule_indices(&st.saved_schedules);
                 let row_h = 20;
-                let max_rows = ((h - 92) / row_h).max(1).min(st.saved_schedules.len() as i32);
-                for i in 0..max_rows {
-                    let sc = &st.saved_schedules[i as usize];
-                    let y = 88 + i as i32 * row_h;
-                    let base = ID_ROW_BASE + i as u32 * 10;
-                    ctx.ui.widgets.push(mk(base, 10, y, 18, 18, Kind::Button("✕".into())));
-                    let del = ctx.ui.widgets.last_mut().unwrap();
-                    del.tag = "delete".into();
-                    ctx.ui.widgets.push(mk(base + 1, 32, y, 60, 18,
-                        Kind::Label(sc.display_time(st.use_military_time), 11, c::LIGHT)));
-                    ctx.ui.widgets.push(mk(base + 2, 96, y, 45, 18,
-                        Kind::Label(sc.display(), 11, c::LIGHT)));
-                    let days = if sc.days.is_empty() { "Every day".to_string() } else { sc.days.clone() };
-                    ctx.ui.widgets.push(mk(base + 3, 145, y, w - 150, 18,
-                        Kind::Label(days, 10, c::LIGHT)));
-                    let row = ctx.ui.widgets.last_mut().unwrap();
-                    row.tag = format!("row{}", i);
+                let visible = ((h - 96) / row_h).max(1) as usize;
+                let max_start = order.len().saturating_sub(visible);
+                let start = (ctx.ui.scroll_offset as usize).min(max_start);
+                ctx.ui.scroll_offset = start as i32;
+                for (vi, &si) in order.iter().skip(start).take(visible).enumerate() {
+                    let sc = &st.saved_schedules[si];
+                    let y = 88 + vi as i32 * row_h;
+                    let base = ID_ROW_BASE + vi as u32 * 10;
+                    let tag = format!("row{}", si);
+                    let mut del = mk(base, 10, y, 18, 18, Kind::Button("✕".into()));
+                    del.tag = tag.clone(); del.enabled = enabled;
+                    ctx.ui.widgets.push(del);
+                    for (sub, text, x, cw) in [
+                        (1u32, sc.display_time(st.use_military_time), 32i32, 60i32),
+                        (2, sc.display(), 96, 45),
+                        (3, if sc.days.is_empty() { "Every day".into() } else { sc.days.clone() }, 145, w - 150),
+                    ] {
+                        let mut item = mk(base + sub, x, y, cw, 18, Kind::Label(text, 11, c::LIGHT));
+                        item.tag = tag.clone(); item.enabled = enabled;
+                        ctx.ui.widgets.push(item);
+                    }
+                }
+                // 对应 ScheduleScrollBar_PreviewMouse*：可拖动的列表滚动条
+                if max_start > 0 {
+                    let mut sb = mk(ID_SCHEDULE_SCROLL, w - 14, 88, 10, h - 98,
+                        Kind::Slider { min: 0.0, max: max_start as f64,
+                            value: start as f64, vertical: true });
+                    sb.enabled = enabled;
+                    ctx.ui.widgets.push(sb);
                 }
             }
         }
@@ -263,16 +339,16 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             match id {
                 ID_MINIMIZE => unsafe { ShowWindow(hwnd, SW_HIDE); },
                 ID_CLOSE => app::hide_control_panel(true),
-                ID_TAB_CONTROLS | ID_TAB_SCHEDULE | ID_TAB_HOTKEYS | ID_TAB_OPTIONS => {
-                    unsafe { CURRENT_TAB = id - ID_TAB_CONTROLS; }
-                    let mut cr = RECT::default();
-                    unsafe { GetClientRect(hwnd, &mut cr); }
-                    ui::relayout_public(ctx, cr.width(), cr.height());
-                }
+                ID_TAB_CONTROLS | ID_TAB_SCHEDULE | ID_TAB_HOTKEYS | ID_TAB_OPTIONS =>
+                    set_tab(id - ID_TAB_CONTROLS, ctx, hwnd),
                 ID_MIN_LINK => dialogs::show_min(),
                 ID_ADD_SCHEDULE => dialogs::show_schedule(None),
-                ID_CLEAR => dialogs::show_warning("Clear Schedule", "Clear all scheduled events?", false, "", dialogs::WarningAction::ClearSchedule),
-                ID_RESYNC => dialogs::show_warning("Reset Brightness", "Resync all displays and reset brightness?", false, "", dialogs::WarningAction::Resync),
+                ID_CLEAR => dialogs::show_warning("Clear Schedule",
+                    "You are about to completely wipe all of your scheduled events. Is this what you truly desire?",
+                    false, "", dialogs::WarningAction::ClearSchedule),
+                ID_RESYNC => dialogs::show_warning("Reset Brightness",
+                    "You are about to reset your brightness settings. Your schedule will remain intact. Is this what you truly desire?",
+                    false, "", dialogs::WarningAction::Resync),
                 ID_INFO_LINK => dialogs::show_info(),
                 ID_INC_TEXT | ID_DEC_TEXT => { /* 焦点由 Ui 维护；热键录入在 WM_KEYDOWN 中处理 */ }
                 i if (ID_QUICK_BASE..ID_QUICK_BASE + 6).contains(&i) => {
@@ -280,17 +356,17 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                     app::quick_set(vals[(i - ID_QUICK_BASE) as usize]);
                 }
                 i if i >= ID_ROW_BASE => {
-                    let row = (i - ID_ROW_BASE) / 10;
-                    let sub = (i - ID_ROW_BASE) % 10;
-                    let a = app::app();
-                    if sub == 0 && (row as usize) < a.settings.saved_schedules.len() {
-                        a.settings.saved_schedules.remove(row as usize);
+                    let Some(real) = row_real_index(ctx, i) else { return; };
+                    let sub = i - (ID_ROW_BASE + ((i - ID_ROW_BASE) / 10) * 10);
+                    let len = app::app().settings.saved_schedules.len();
+                    if real >= len { return; }
+                    ctx.ui.selected_row = Some(real);
+                    if sub == 0 {
+                        app::app().settings.saved_schedules.remove(real);
                         app::trigger_save();
-                        let mut cr = RECT::default();
-                        unsafe { GetClientRect(hwnd, &mut cr); }
-                        ui::relayout_public(ctx, cr.width(), cr.height());
-                    } else if (row as usize) < a.settings.saved_schedules.len() {
-                        dialogs::show_schedule(Some(row as usize));
+                        relayout(ctx, hwnd);
+                    } else {
+                        dialogs::show_schedule(Some(real));
                     }
                 }
                 _ => {}
@@ -319,15 +395,68 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         }
         Event::Value(id, v) => {
             if id == ID_SLIDER {
+                app::app().last_user_interaction = app::now_ms();
                 app::app().settings.last_opacity = v;
                 app::trigger_save();
                 app::apply_brightness(v, false, false, 0, false);
+            } else if id == ID_SCHEDULE_SCROLL {
+                ctx.ui.scroll_offset = v.round() as i32;
+                relayout(ctx, hwnd);
             }
         }
-        Event::Wheel(id, _d) => {
-            if id == ID_SLIDER {
+        Event::Wheel(id, delta) => {
+            if (ID_TAB_CONTROLS..=ID_TAB_OPTIONS).contains(&id) {
+                // 对应 TabsArea_MouseWheel：滚轮切换 Tab
+                let cur = unsafe { CURRENT_TAB };
+                let next = if delta > 0 { (cur + 4 - 1) % 4 } else { (cur + 1) % 4 };
+                set_tab(next, ctx, hwnd);
+            } else if id == ID_SLIDER {
+                app::app().last_user_interaction = app::now_ms();
                 let v = ctx.ui.value(ID_SLIDER);
                 app::apply_brightness(v, false, false, 0, false);
+            } else if unsafe { CURRENT_TAB } == 1 {
+                // 对应 ScheduleList_PreviewMouseWheel：滚动日程列表
+                let len = app::app().settings.saved_schedules.len() as i32;
+                ctx.ui.scroll_offset = (ctx.ui.scroll_offset - delta.signum()).clamp(0, (len - 1).max(0));
+                relayout(ctx, hwnd);
+            }
+        }
+        Event::DoubleClick(id) => {
+            if let Some(real) = row_real_index(ctx, id) {
+                ctx.ui.selected_row = Some(real);
+                dialogs::show_schedule(Some(real));
+            }
+        }
+        Event::Key(_, vk) => {
+            match vk {
+                VK_LEFT | VK_RIGHT => {
+                    // 对应 MainTabs_PreviewKeyDown
+                    let cur = unsafe { CURRENT_TAB };
+                    let next = if vk == VK_LEFT { (cur + 4 - 1) % 4 } else { (cur + 1) % 4 };
+                    set_tab(next, ctx, hwnd);
+                }
+                VK_UP | VK_DOWN => {
+                    let len = app::app().settings.saved_schedules.len();
+                    if len > 0 {
+                        let cur = ctx.ui.selected_row.unwrap_or(0) as i32;
+                        ctx.ui.selected_row = Some((cur + if vk == VK_DOWN { 1 } else { -1 })
+                            .clamp(0, len as i32 - 1) as usize);
+                    }
+                }
+                VK_DELETE => {
+                    if let Some(real) = ctx.ui.selected_row {
+                        if real < app::app().settings.saved_schedules.len() {
+                            app::app().settings.saved_schedules.remove(real);
+                            app::trigger_save();
+                            ctx.ui.selected_row = None;
+                            relayout(ctx, hwnd);
+                        }
+                    }
+                }
+                VK_RETURN | VK_SPACE => {
+                    if let Some(real) = ctx.ui.selected_row { dialogs::show_schedule(Some(real)); }
+                }
+                _ => {}
             }
         }
         Event::Text(..) | Event::None => {}
@@ -423,6 +552,8 @@ pub fn show_tray_menu() {
         SetWindowPos(h, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
         ShowWindow(h, SW_SHOWNA);
     }
+    // 对应 HandleTrayMenuToggle：菜单显示时清空 ToolTip，隐藏时恢复
+    app::tray_tip(app::app().hwnd_controller, "");
     app::install_mouse_hook();
 }
 
