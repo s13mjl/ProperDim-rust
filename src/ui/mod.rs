@@ -31,6 +31,11 @@ pub struct WindowCtx {
     pub min_h: i32,
     pub resizable: bool,
     pub hide_on_deactivate: bool,
+    /// 窗口样式（默认 WS_POPUP）；控制面板需要 WS_MINIMIZEBOX 才能最小化到任务栏。
+    pub win_style: u32,
+    /// 拖拽拉伸上限（对应上游 ResizeThumb 的 150% 限制），0 表示不限制。
+    pub max_w: i32,
+    pub max_h: i32,
 }
 
 impl WindowCtx {
@@ -38,6 +43,7 @@ impl WindowCtx {
         WindowCtx {
             kind, ui: Ui::new(), title: title.to_string(), show_title,
             bg: c::BG, min_w: 0, min_h: 0, resizable: false, hide_on_deactivate: false,
+            win_style: WS_POPUP, max_w: 0, max_h: 0,
         }
     }
     pub fn title_rect(&self, w: i32, _h: i32) -> Option<RECT> {
@@ -71,11 +77,11 @@ pub fn create_window(
 ) -> HWND {
     let t = wide(title);
     let a = app::app();
+    let style = ctx.win_style | if visible { WS_VISIBLE } else { 0 };
     let boxed = Box::into_raw(Box::new(ctx));
     let hwnd = unsafe {
         CreateWindowExW(
-            ex_style, cls.as_ptr(), t.as_ptr(),
-            WS_POPUP | if visible { WS_VISIBLE } else { 0 },
+            ex_style, cls.as_ptr(), t.as_ptr(), style,
             x, y, w, h, NULL, NULL, a.instance, boxed as *const c_void,
         )
     };
@@ -193,10 +199,22 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = wparam as i32;
-            if msg == WM_KEYDOWN && vk == VK_ESCAPE && ctx.kind != WindowKind::Controller {
-                ShowWindow(hwnd, SW_HIDE);
-                if matches!(ctx.kind, WindowKind::ScheduleDialog | WindowKind::MinDialog
-                    | WindowKind::InfoWindow | WindowKind::Warning) { app::end_modal(); }
+            if msg == WM_KEYDOWN && vk == VK_ESCAPE {
+                match ctx.kind {
+                    WindowKind::Controller => {}
+                    // 对应 ControlPanel 的 PreviewKeyDown：Esc 走 HandleClosure（受 CloseToTray 影响）
+                    WindowKind::ControlPanel => app::hide_control_panel(true),
+                    WindowKind::Warning => {
+                        // 对应 WarningMessage：Esc = 回答 "No"
+                        app::app().warning_result = Some(false);
+                        ShowWindow(hwnd, SW_HIDE);
+                        app::end_modal();
+                    }
+                    _ => {
+                        ShowWindow(hwnd, SW_HIDE);
+                        app::end_modal();
+                    }
+                }
                 return 0;
             }
             // 对应 HotkeyTextBox_PreviewKeyDown：录制组合键
@@ -207,8 +225,32 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
                     return 0;
                 }
             }
+            // 对应 WPF 的 Tab 焦点遍历
+            if msg == WM_KEYDOWN && vk == VK_TAB {
+                let back = unsafe { GetAsyncKeyState(VK_SHIFT) != 0 };
+                ctx.ui.focus_next(back);
+                return 0;
+            }
             // 对应 App.xaml.cs 的 RegisterClassHandler：CheckBox(Enter) / Hyperlink(Enter+Space)
-            if (vk == VK_RETURN || vk == VK_SPACE) && ctx.ui.focus.is_none() {
+            if vk == VK_RETURN || vk == VK_SPACE {
+                if let Some(id) = ctx.ui.focus {
+                    if let Some(k) = ctx.ui.get(id).map(|w| w.kind.clone()) {
+                        match k {
+                            Kind::CheckBox(_, b) | Kind::DayBox(_, b) => {
+                                ctx.ui.set_checked(id, !b);
+                                dispatch(ctx, Event::Check(id, !b), hwnd);
+                            }
+                            Kind::TextBox(_) | Kind::Combo(_) => {}
+                            // 日程行是 Label，但上游 Enter/Space 是「编辑选中项」而非点击
+                            Kind::Label(..) if ctx.ui.get(id).map(|w| w.tag.starts_with("row")).unwrap_or(false) => {
+                                dispatch(ctx, Event::Key(0, vk), hwnd);
+                            }
+                            _ => { dispatch(ctx, Event::Click(id), hwnd); }
+                        }
+                        return 0;
+                    }
+                }
+                // 无焦点时退化为鼠标悬停控件（保持可用性）
                 if let Some(id) = ctx.ui.hover {
                     if let Some(k) = ctx.ui.get(id).map(|w| w.kind.clone()) {
                         match k {
@@ -220,11 +262,6 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
                         }
                     }
                 }
-            }
-            if (vk == VK_RETURN || vk == VK_SPACE) && ctx.ui.focus.is_some() {
-                let id = ctx.ui.focus.unwrap();
-                dispatch(ctx, Event::Click(id), hwnd);
-                return 0;
             }
             dispatch(ctx, Event::Key(0, vk), hwnd);
             return 0;
@@ -263,10 +300,15 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             return 0;
         }
         WM_GETMINMAXINFO => {
+            let mm = &mut *(lparam as *mut MINMAXINFO);
             if ctx.min_w > 0 {
-                let mm = &mut *(lparam as *mut MINMAXINFO);
                 mm.ptMinTrackSize.x = ctx.min_w;
                 mm.ptMinTrackSize.y = ctx.min_h;
+            }
+            // 对应 ResizeThumb_DragDelta 的 min/maxWidth：用户拖拽不能超过 150%
+            if ctx.max_w > 0 {
+                mm.ptMaxTrackSize.x = ctx.max_w;
+                mm.ptMaxTrackSize.y = ctx.max_h;
             }
             return 0;
         }

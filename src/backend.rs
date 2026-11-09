@@ -189,7 +189,8 @@ impl DisplayConfig {
                 if DisplayConfigGetDeviceInfo(&mut tgt as *mut _ as *mut c_void) == 0 {
                     device_path = from_wide_buf(&tgt.monitor_device_path);
                     let raw = from_wide_buf(&tgt.monitor_friendly_device_name);
-                    if let (Some(a), Some(b)) = (raw.find('('), raw.rfind(')')) {
+                    let close = raw.find('(').and_then(|a| raw[a..].find(')').map(|i| a + i));
+                    if let (Some(a), Some(b)) = (raw.find('('), close) {
                         if b > a + 1 {
                             let inner = raw[a + 1..b].trim().to_string();
                             if !inner.is_empty() { result = inner; }
@@ -295,6 +296,28 @@ fn friendly_name(device: &str, adapter: &str) -> String {
     "Display".into()
 }
 
+/// 对应 WPF `Key` 枚举里非字母数字的键名 → 虚拟键码（`KeyInterop.VirtualKeyFromKey` 的等价表）。
+const NAMED_KEYS: &[(&str, u32)] = &[
+    ("backspace", 0x08), ("tab", 0x09), ("clear", 0x0C), ("enter", 0x0D),
+    ("pause", 0x13), ("capital", 0x14), ("capslock", 0x14), ("escape", 0x1B),
+    ("space", 0x20), ("pageup", 0x21), ("pagedown", 0x22), ("end", 0x23),
+    ("home", 0x24), ("left", 0x25), ("up", 0x26), ("right", 0x27), ("down", 0x28),
+    ("select", 0x29), ("print", 0x2A), ("execute", 0x2B), ("printscreen", 0x2C),
+    ("snapshot", 0x2C), ("insert", 0x2D), ("delete", 0x2E), ("help", 0x2F),
+    ("apps", 0x5D), ("sleep", 0x5F),
+    ("multiply", 0x6A), ("add", 0x6B), ("separator", 0x6C), ("subtract", 0x6D),
+    ("decimal", 0x6E), ("divide", 0x6F),
+    ("numlock", 0x90), ("scroll", 0x91),
+    ("browserback", 0xA6), ("browserforward", 0xA7), ("browserrefresh", 0xA8),
+    ("browserstop", 0xA9), ("browsersearch", 0xAA), ("browserfavorites", 0xAB),
+    ("browserhome", 0xAC), ("volumemute", 0xAD), ("volumedown", 0xAE), ("volumeup", 0xAF),
+    ("medianexttrack", 0xB0), ("mediaprevioustrack", 0xB1), ("mediastop", 0xB2),
+    ("mediaplaypause", 0xB3),
+    ("oem1", 0xBA), ("oemplus", 0xBB), ("oemcomma", 0xBC), ("oemminus", 0xBD),
+    ("oemperiod", 0xBE), ("oem2", 0xBF), ("oem3", 0xC0), ("oem4", 0xDB),
+    ("oem5", 0xDC), ("oem6", 0xDD), ("oem7", 0xDE), ("oem8", 0xDF), ("oem102", 0xE2),
+];
+
 /// 对应 C# 的 `"Ctrl + Alt + Up"` 热键字符串解析。
 fn parse_hotkey(s: &str, id: i32) -> Option<(u32, u32)> {
     let mut mods = 0u32;
@@ -325,7 +348,7 @@ fn parse_hotkey(s: &str, id: i32) -> Option<(u32, u32)> {
                     x if x.starts_with('f') && x.len() > 1 => {
                         if let Ok(n) = x[1..].parse::<u32>() { 0x6F + n } else { 0 }
                     }
-                    _ => 0,
+                    x => NAMED_KEYS.iter().find(|(n, _)| *n == x).map(|(_, vk)| *vk).unwrap_or(0),
                 };
                 let _ = id;
             }
@@ -459,6 +482,23 @@ mod tests {
         assert_eq!(parse_hotkey("Ctrl + Shift + F5", 2), Some((MOD_CONTROL | MOD_SHIFT, 0x74)));
         assert_eq!(parse_hotkey("Win + D1", 1), Some((MOD_WIN, b'1' as u32)));
         assert_eq!(parse_hotkey("", 1), None);
+    }
+    #[test]
+    fn brightness_mapping_matches_upstream() {
+        // 对应 ApplyBrightness：0.01-1.0 比例映射到 activeFloor-1.0
+        assert!((Win32Backend::to_hardware(0.01, 0.30, false) - 0.30).abs() < 1e-9);
+        assert!((Win32Backend::to_hardware(1.0, 0.30, false) - 1.0).abs() < 1e-9);
+        let mid = Win32Backend::to_hardware(0.65, 0.30, false);
+        assert!((mid - (0.30 + (0.64 / 0.99) * 0.70)).abs() < 1e-9, "{}", mid);
+        // ignoreMinimum 时直接透传且允许 0
+        assert_eq!(Win32Backend::to_hardware(0.0, 0.30, true), 0.0);
+        assert_eq!(Win32Backend::to_hardware(0.42, 0.30, true), 0.42);
+    }
+    #[test]
+    fn oem_hotkeys_parse() {
+        assert_eq!(parse_hotkey("Ctrl + OemPlus", 1), Some((MOD_CONTROL, 0xBB)));
+        assert_eq!(parse_hotkey("Ctrl + NumPad5", 1), Some((MOD_CONTROL, 0x65)));
+        assert_eq!(parse_hotkey("Alt + Multiply", 1), Some((MOD_ALT, 0x6A)));
     }
     #[test]
     fn virtual_keywords_present() {

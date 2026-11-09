@@ -44,6 +44,8 @@ static mut SCH_TIME: (u32, u32) = (12, 0);
 static mut SCH_PM: bool = false;
 static mut SCH_24H: bool = false;
 static mut SCH_BRIGHTNESS: f64 = 1.0;
+/// 对应 `DialogDimmerSlider.Minimum = ConfigManager.Settings.GlobalMinimum`。
+static mut SCH_MIN: f64 = 0.30;
 static mut SCH_DAYS: [bool; 7] = [true; 7];
 /// UI 顺序 M,T,W,Th,F,S,Su → C# 的短日名（对应 `_shortDays[DayOfWeek]`）。
 const UI_SHORT: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
@@ -55,22 +57,39 @@ static mut WARN_CUSTOM: String = String::new();
 
 fn center_window(hwnd: HWND, w: i32, h: i32) {
     unsafe {
-        let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-        let mut r = RECT::default();
-        GetWindowRect(hwnd, &mut r);
-        SetWindowPos(hwnd, HWND_TOP, (sw - r.width()) / 2, (sh - r.height()) / 2,
+        // 对应 WindowStartupLocation=CenterOwner：以控制面板所在显示器的工作区居中
+        let owner = app::app().hwnd_panel;
+        let (mut mx, mut my, mut mw, mut mh) = (0, 0,
+            GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        if owner != NULL {
+            let mon = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFOEXW::default();
+            mi.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if mon != NULL && GetMonitorInfoW(mon, &mut mi) != 0 {
+                let r = mi.rcWork;
+                mx = r.left; my = r.top; mw = r.right - r.left; mh = r.bottom - r.top;
+            }
+        }
+        SetWindowPos(hwnd, HWND_TOP, mx + (mw - w) / 2, my + (mh - h) / 2,
             w, h, SWP_NOACTIVATE);
     }
 }
-/// 对应各窗口的 `ApplySavedSize()`：读取持久化的窗口尺寸。
+/// 对应各窗口的 `ApplySavedSize()`：只有宽高都 >= MinWidth/MinHeight 才采用，
+/// 采用时宽度取 min(保存宽度, 上限)，高度按固定宽高比回算（上游不允许自由拉伸）。
 fn saved_size(kind: WindowKind) -> (i32, i32) {
-    let s = &app::app().settings;
-    match kind {
-        WindowKind::ScheduleDialog => (s.schedule_dialog_width as i32, s.schedule_dialog_height as i32),
-        WindowKind::MinDialog => (s.min_brightness_dialog_width as i32, s.min_brightness_dialog_height as i32),
-        WindowKind::InfoWindow => (s.app_info_window_width as i32, s.app_info_window_height as i32),
-        WindowKind::Warning => (s.warning_message_width as i32, s.warning_message_height as i32),
-        _ => (320, 280),
+    let st = &app::app().settings;
+    let (sw, sh, min_w, min_h, ratio, cap): (f64, f64, f64, f64, f64, f64) = match kind {
+        WindowKind::ScheduleDialog => (st.schedule_dialog_width, st.schedule_dialog_height, 320.0, 280.0, 320.0 / 290.0, 500.0),
+        WindowKind::MinDialog => (st.min_brightness_dialog_width, st.min_brightness_dialog_height, 300.0, 260.0, 300.0 / 260.0, 450.0),
+        WindowKind::InfoWindow => (st.app_info_window_width, st.app_info_window_height, 320.0, 394.0, 320.0 / 394.0, 480.0),
+        WindowKind::Warning => (st.warning_message_width, st.warning_message_height, 300.0, 150.0, 300.0 / 150.0, 450.0),
+        _ => (320.0, 280.0, 320.0, 280.0, 320.0 / 290.0, 500.0),
+    };
+    if sw >= min_w && sh >= min_h {
+        let cw = sw.min(cap);
+        (cw.round() as i32, (cw / ratio).round() as i32)
+    } else {
+        (min_w as i32, (min_w / ratio).round() as i32)
     }
 }
 
@@ -100,11 +119,12 @@ pub fn show_schedule(edit: Option<usize>) {
     let st = a.settings.clone();
     unsafe {
         SCH_24H = st.use_military_time;
+        SCH_MIN = st.global_minimum.clamp(0.01, 1.0);
         if let Some(i) = edit {
             if let Some(sc) = st.saved_schedules.get(i) {
                 SCH_TIME = sc.time;
                 SCH_PM = sc.time.0 >= 12;
-                SCH_BRIGHTNESS = sc.brightness;
+                SCH_BRIGHTNESS = sc.brightness.max(SCH_MIN).min(1.0);
                 // 对应 SetDayCheckboxes：兼容 "Mo" / "M" / "Monday" 等形式，按 ',' 与 ' ' 分割
                 let parts: Vec<&str> = sc.days.split(|c| c == ',' || c == ' ')
                     .filter(|s| !s.is_empty()).collect();
@@ -118,18 +138,25 @@ pub fn show_schedule(edit: Option<usize>) {
                 }
             }
         } else {
-            SCH_TIME = (12, 0);
-            SCH_PM = false;
-            SCH_BRIGHTNESS = 1.0;
+            // 对应 Add 模式默认值：当前时间 + Max(Minimum, LastOpacity)
+            let mut now = SYSTEMTIME::default();
+            GetLocalTime(&mut now);
+            SCH_TIME = (now.wHour as u32, now.wMinute as u32);
+            SCH_PM = SCH_TIME.0 >= 12;
+            SCH_BRIGHTNESS = st.last_opacity.max(SCH_MIN).min(1.0);
+            // 对应 string.IsNullOrEmpty(savedDays) → 全选
+            let days_src = if st.last_schedule_days.trim().is_empty() {
+                "Mo, Tu, We, Th, Fr, Sa, Su".to_string()
+            } else { st.last_schedule_days.clone() };
             for (k, d) in UI_SHORT.iter().enumerate() {
-                SCH_DAYS[k] = st.last_schedule_days.contains(d);
+                SCH_DAYS[k] = days_src.contains(d);
             }
         }
     }
     let hwnd = &mut app::app().hwnd_schedule as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::ScheduleDialog);
     show_or_create(unsafe { &mut *hwnd }, "ProperDimRustSchedule", "Event Scheduler", cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::ScheduleDialog, "Event Scheduler", true); c.bg = c::BG; c.resizable = true; c.min_w = s(320); c.min_h = s(280); c });
+        || { let mut c = WindowCtx::new(WindowKind::ScheduleDialog, "Event Scheduler", true); c.bg = c::BG; c.resizable = true; c.min_w = s(320); c.min_h = s(280); c.max_w = s(500); c.max_h = s(453); c });
 }
 
 pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
@@ -161,8 +188,10 @@ pub fn layout_schedule(ctx: &mut WindowCtx, w: i32, _h: i32) {
     let pct = format!("{}%", (brightness * 100.0).round() as i32);
     ctx.ui.widgets.push(mk(3, 66, 112, 108, 18, Kind::Label("Brightness: ".into(), 12, c::WHITE)));
     ctx.ui.widgets.push(mk(4, 172, 112, 46, 18, Kind::Label(pct, 12, c::WHITE)));
-    ctx.ui.widgets.push(mk(ID_SCH_SLIDER, 20, 134, 240, 24,
-        Kind::Slider { min: 0.01, max: 1.0, value: brightness, vertical: false }));
+    let mut sld = mk(ID_SCH_SLIDER, 20, 134, 240, 24,
+        Kind::Slider { min: unsafe { SCH_MIN }, max: 1.0, value: brightness, vertical: false });
+    sld.tag = "fine".into(); // 对应 DialogDimmerSlider_PreviewMouseWheel：固定 ±1%
+    ctx.ui.widgets.push(sld);
     ctx.ui.widgets.push(mk(ID_SCH_PREVIEW, 266, 136, 24, 20, Kind::PreviewButton));
     if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "preview".into(); }
 
@@ -252,6 +281,11 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             }
         }
         Event::Check(id, v) => {
+            if (ID_SCH_DAY_BASE..ID_SCH_DAY_BASE + 7).contains(&id) {
+                // 对应 DayCheck_Changed -> ValidateTime()：即时刷新按钮的冲突状态
+                relayout_hwnd(ctx, hwnd);
+                return;
+            }
             if id == ID_SCH_24H {
                 unsafe {
                     // 对应 Is24hCheck_Changed：切回 12 小时制时同步 AM/PM，并隐藏 AM/PM 控件
@@ -264,7 +298,14 @@ pub fn on_schedule(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             }
         }
         Event::Value(id, v) => {
-            if id == ID_SCH_SLIDER { unsafe { SCH_BRIGHTNESS = v; } relayout_hwnd(ctx, hwnd); }
+            if id == ID_SCH_SLIDER {
+                unsafe { SCH_BRIGHTNESS = v; }
+                // 对应 DialogSlider_ValueChanged：仅拖动时实时预览（滚轮不预览）
+                if ctx.ui.capture == Some(ID_SCH_SLIDER) {
+                    if ctx.ui.slider_click { app::start_preview(v); } else { app::preview_value(v); }
+                }
+                relayout_hwnd(ctx, hwnd);
+            }
         }
         Event::Key(_, vk) if vk == VK_RETURN || vk == VK_SPACE => {
             app::start_preview(ctx.ui.value(ID_SCH_SLIDER));
@@ -295,10 +336,13 @@ fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     for (i, d) in short.iter().enumerate() {
         if days[i] { if !day_str.is_empty() { day_str.push_str(", "); } day_str.push_str(d); }
     }
-    let all = day_str == "Mo, Tu, We, Th, Fr, Sa, Su";
     let a = app::app();
+    // 对应 ValidateTime：时间相同且星期集合有交集才算冲突
     let duplicate = a.settings.saved_schedules.iter().enumerate().any(|(i, sc)| {
-        sc.time == time && Some(i) != a.edit_schedule_index
+        if sc.time != time || Some(i) == a.edit_schedule_index { return false; }
+        let parts: Vec<&str> = sc.days.split(|c| c == ',' || c == ' ')
+            .filter(|x| !x.is_empty()).collect();
+        parts.iter().any(|p| day_str.split(", ").any(|d| d == *p))
     });
     // 上游通过 ValidateTime 禁用 Add 按钮；这里保留一道静默防线
     if duplicate { return; }
@@ -310,18 +354,16 @@ fn add_schedule(_ctx: &mut WindowCtx, hwnd: HWND) {
     let last_triggered = a.edit_schedule_index
         .and_then(|i| a.settings.saved_schedules.get(i).map(|s| s.last_triggered.clone()))
         .unwrap_or_else(|| now_stamp.clone());
-    let sc = DimSchedule {
-        time, brightness, days: if all { String::new() } else { day_str.clone() },
-        last_triggered,
-    };
+    // 上游 Add_Click 用 string.Join(", ", selectedDays)，即使全选也写显式列表
+    let sc = DimSchedule { time, brightness, days: day_str.clone(), last_triggered };
     if let Some(i) = a.edit_schedule_index {
         if i < a.settings.saved_schedules.len() { a.settings.saved_schedules[i] = sc; }
     } else {
         a.settings.saved_schedules.push(sc);
     }
-    a.settings.saved_schedules.sort_by_key(|x| (x.time.0, x.time.1));
-    // 对应 ScheduleDialog.xaml.cs:473 保存本次选择的星期
-    a.settings.last_schedule_days = if all { "Mo, Tu, We, Th, Fr, Sa, Su".into() } else { day_str };
+    // 上游不重排存储顺序（显示顺序由 RefreshList 的排序副本决定）
+    // 对应 Add_Click：保存本次选择的星期
+    a.settings.last_schedule_days = day_str;
     a.edit_schedule_index = None;
     config::save(&a.settings);
     unsafe { ShowWindow(hwnd, SW_HIDE); }
@@ -348,7 +390,7 @@ pub fn show_min() {
     let hwnd = &mut app::app().hwnd_min as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::MinDialog);
     show_or_create(unsafe { &mut *hwnd }, "ProperDimRustMin", "ProperDim", cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::MinDialog, "Adjust Minimum Brightness", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(260); c });
+        || { let mut c = WindowCtx::new(WindowKind::MinDialog, "Adjust Minimum Brightness", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(260); c.max_w = s(450); c.max_h = s(390); c });
 }
 
 pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
@@ -363,8 +405,10 @@ pub fn layout_min(ctx: &mut WindowCtx, w: i32, _h: i32) {
         Kind::Label("Minimum Brightness: ".into(), 14, c::WHITE)));
     ctx.ui.widgets.push(mk(3, 190, 76, 46, 20,
         Kind::Label(format!("{}%", (v * 100.0).round() as i32), 14, c::WHITE)));
-    ctx.ui.widgets.push(mk(ID_MIN_SLIDER, 15, 102, 230, 24,
-        Kind::Slider { min: 0.01, max: 0.40, value: v, vertical: false }));
+    let mut sld = mk(ID_MIN_SLIDER, 15, 102, 230, 24,
+        Kind::Slider { min: 0.01, max: 0.40, value: v, vertical: false });
+    sld.tag = "fine".into(); // 对应 MinSlider_MouseWheel：固定 ±1%
+    ctx.ui.widgets.push(sld);
     ctx.ui.widgets.push(mk(ID_MIN_PREVIEW, 252, 104, 24, 20, Kind::PreviewButton));
     if let Some(t) = ctx.ui.widgets.last_mut() { t.tag = "preview".into(); }
     let mut note = mk(4, 15, 132, w - 30, 52,
@@ -393,7 +437,16 @@ pub fn on_min(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             }
             _ => {}
         },
-        Event::Value(id, v) => { if id == ID_MIN_SLIDER { unsafe { MIN_VALUE = v; } relayout_hwnd(ctx, hwnd); } }
+        Event::Value(id, v) => {
+            if id == ID_MIN_SLIDER {
+                unsafe { MIN_VALUE = v; }
+                // 对应 MinSlider_PreviewMouseMove：拖动时实时预览最小亮度的实际效果
+                if ctx.ui.capture == Some(ID_MIN_SLIDER) {
+                    if ctx.ui.slider_click { app::start_preview(v); } else { app::preview_value(v); }
+                }
+                relayout_hwnd(ctx, hwnd);
+            }
+        }
         Event::Key(_, vk) if vk == VK_RETURN || vk == VK_SPACE => {
             app::start_preview(unsafe { MIN_VALUE });
         }
@@ -415,7 +468,7 @@ pub fn show_info() {
     let hwnd = &mut app::app().hwnd_info as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::InfoWindow);
     show_or_create(unsafe { &mut *hwnd }, "ProperDimRustInfo", "ProperDim Info", cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::InfoWindow, "ProperDim Info", true); c.bg = c::INFO_BG; c.resizable = true; c.min_w = s(320); c.min_h = s(394); c });
+        || { let mut c = WindowCtx::new(WindowKind::InfoWindow, "ProperDim Info", true); c.bg = c::INFO_BG; c.resizable = true; c.min_w = s(320); c.min_h = s(394); c.max_w = s(480); c.max_h = s(591); c });
 }
 
 pub fn layout_info(ctx: &mut WindowCtx, w: i32, _h: i32) {
@@ -501,7 +554,7 @@ pub fn show_warning(title: &str, message: &str, ok_only: bool, custom: &str, act
     let hwnd = &mut a.hwnd_warning as *mut HWND;
     let (cw, ch) = saved_size(WindowKind::Warning);
     show_or_create(unsafe { &mut *hwnd }, "ProperDimRustWarning", title, cw, ch,
-        || { let mut c = WindowCtx::new(WindowKind::Warning, "", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(150); c });
+        || { let mut c = WindowCtx::new(WindowKind::Warning, "", true); c.bg = c::BG; c.resizable = true; c.min_w = s(300); c.min_h = s(150); c.max_w = s(450); c.max_h = s(225); c });
 }
 
 pub fn layout_warning(ctx: &mut WindowCtx, w: i32, _h: i32) {

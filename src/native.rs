@@ -92,6 +92,7 @@ pub const WS_EX_TOPMOST: u32 = 0x00000008;
 pub const SW_HIDE: i32 = 0;
 pub const SW_SHOW: i32 = 5;
 pub const SW_SHOWNA: i32 = 8;
+pub const SW_MINIMIZE: i32 = 6;
 pub const SWP_NOSIZE: u32 = 0x0001;
 pub const SWP_NOMOVE: u32 = 0x0002;
 pub const SWP_NOACTIVATE: u32 = 0x0010;
@@ -118,6 +119,7 @@ pub const VK_SHIFT: i32 = 0x10;
 pub const VK_CONTROL: i32 = 0x11;
 pub const VK_MENU: i32 = 0x12;
 pub const VK_LWIN: i32 = 0x5B;
+pub const VK_RWIN: i32 = 0x5C;
 
 pub const MK_LBUTTON: usize = 0x0001;
 pub const MK_RBUTTON: usize = 0x0002;
@@ -437,6 +439,7 @@ extern "system" {
     pub fn Rectangle(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32) -> BOOL;
     pub fn Ellipse(hdc: HDC, left: i32, top: i32, right: i32, bottom: i32) -> BOOL;
     pub fn DrawTextW(hdc: HDC, lpString: *const u16, nCount: i32, lpRect: *mut RECT, uFormat: u32) -> i32;
+    pub fn DrawFocusRect(hdc: HDC, lprc: *const RECT) -> BOOL;
     pub fn TextOutW(hdc: HDC, x: i32, y: i32, lpString: *const u16, c: i32) -> BOOL;
     pub fn SetBkMode(hdc: HDC, mode: i32) -> i32;
     pub fn SetTextColor(hdc: HDC, color: COLORREF) -> COLORREF;
@@ -639,6 +642,7 @@ extern "system" {
         mode_count: *mut u32, modes: *mut DISPLAYCONFIG_MODE_INFO, topology: *mut u32) -> i32;
     pub fn DisplayConfigGetDeviceInfo(request: *mut c_void) -> i32;
     pub fn MonitorFromPoint(pt: POINT, flags: u32) -> HWND;
+    pub fn MonitorFromWindow(hwnd: HWND, flags: u32) -> HWND;
 }
 
 #[link(name = "shell32")]

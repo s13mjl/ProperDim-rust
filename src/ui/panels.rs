@@ -87,7 +87,13 @@ pub fn create_control_panel(_instance: HINSTANCE) -> HWND {
     ctx.bg = c::BG;
     ctx.min_w = s(350);
     ctx.min_h = s(200);
+    // 对应 ResizeThumb_DragDelta：最高 150%（525 宽）
+    ctx.max_w = s(525);
+    ctx.max_h = s(300);
     ctx.resizable = true;
+    // 对应 WPF WindowStyle=None + ResizeMode=CanResize + ShowInTaskbar=true：
+    // 需要任务栏按钮与最小化能力，因此不能是 TOOLWINDOW 弹窗
+    ctx.win_style = WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU;
     let a = app::app();
     // 对应 Window_Loaded：宽度上限 525、强制 350/200 宽高比
     let cw = a.settings.control_panel_width.min(525.0) as i32;
@@ -105,7 +111,7 @@ pub fn create_control_panel(_instance: HINSTANCE) -> HWND {
     let (x, y) = if valid { (left as i32, top as i32) }
         else { (vx + sw / 2 - s(cw) / 2, vy + sh / 2 - s(ch) / 2) };
     ui::create_window(&cls, "ProperDim Control Panel", x, y, s(cw), s(ch),
-        WS_EX_TOOLWINDOW, ctx, false)
+        0, ctx, false)
 }
 
 /// 对应 `ControlPanel.RefreshList()`：计算未来 7 天内下次触发时间并据此排序。
@@ -174,6 +180,22 @@ fn row_real_index(ctx: &WindowCtx, id: u32) -> Option<usize> {
     ctx.ui.widgets.iter().find(|w| w.id == base)
         .and_then(|w| w.tag.strip_prefix("row"))
         .and_then(|s| s.parse::<usize>().ok())
+}
+
+/// 对应 ListBox 的 ScrollIntoView：把选中行滚到可视区内。
+fn ensure_row_visible(hwnd: HWND, ctx: &mut WindowCtx, real: usize, order: &[usize]) {
+    let Some(pos) = order.iter().position(|&i| i == real) else { return; };
+    let sc = app::app().scale;
+    let mut cr = RECT::default();
+    unsafe { GetClientRect(hwnd, &mut cr); }
+    let lh = (cr.height() as f64 / sc).round() as i32;
+    let visible = (((lh - 96) / 20).max(1)) as usize;
+    let mut start = ctx.ui.scroll_offset.max(0) as usize;
+    if pos < start { start = pos; }
+    else if pos >= start + visible { start = pos + 1 - visible; }
+    let max_start = order.len().saturating_sub(visible);
+    ctx.ui.scroll_offset = start.min(max_start) as i32;
+    relayout(ctx, hwnd);
 }
 
 fn relayout(ctx: &mut WindowCtx, hwnd: HWND) {
@@ -321,7 +343,7 @@ pub fn record_hotkey(ctx: &mut WindowCtx, id: u32, vk: u32, lparam: LPARAM) {
         if GetAsyncKeyState(VK_CONTROL) != 0 { parts.push("Ctrl".into()); }
         if GetAsyncKeyState(VK_MENU) != 0 { parts.push("Alt".into()); }
         if GetAsyncKeyState(VK_SHIFT) != 0 { parts.push("Shift".into()); }
-        if GetAsyncKeyState(VK_LWIN) != 0 { parts.push("Win".into()); }
+        if GetAsyncKeyState(VK_LWIN) != 0 || GetAsyncKeyState(VK_RWIN) != 0 { parts.push("Win".into()); }
     }
     let raw_name = unsafe {
         let mut buf = [0u16; 64];
@@ -344,20 +366,44 @@ pub fn record_hotkey(ctx: &mut WindowCtx, id: u32, vk: u32, lparam: LPARAM) {
 }
 
 /// 把虚拟键映射成原版 WPF `Key.ToString()` 的字符串（parse_hotkey 认识的形式）。
-fn wpf_key_name(vk: u32, raw: &str) -> String {
+fn wpf_key_name(vk: u32, _raw: &str) -> String {
+    // 与 backend::NAMED_KEYS 一一对应，保证录制出来的字符串能被重新解析成同一个 VK
+    let named = match vk {
+        0x08 => Some("Backspace"), 0x09 => Some("Tab"), 0x0C => Some("Clear"),
+        0x0D => Some("Enter"), 0x13 => Some("Pause"), 0x14 => Some("Capital"),
+        0x1B => Some("Escape"), 0x20 => Some("Space"),
+        0x21 => Some("PageUp"), 0x22 => Some("PageDown"), 0x23 => Some("End"),
+        0x24 => Some("Home"), 0x25 => Some("Left"), 0x26 => Some("Up"),
+        0x27 => Some("Right"), 0x28 => Some("Down"),
+        0x29 => Some("Select"), 0x2A => Some("Print"), 0x2B => Some("Execute"),
+        0x2C => Some("PrintScreen"), 0x2D => Some("Insert"), 0x2E => Some("Delete"),
+        0x2F => Some("Help"), 0x5D => Some("Apps"), 0x5F => Some("Sleep"),
+        0x6A => Some("Multiply"), 0x6B => Some("Add"), 0x6C => Some("Separator"),
+        0x6D => Some("Subtract"), 0x6E => Some("Decimal"), 0x6F => Some("Divide"),
+        0x90 => Some("NumLock"), 0x91 => Some("Scroll"),
+        0xA6 => Some("BrowserBack"), 0xA7 => Some("BrowserForward"),
+        0xA8 => Some("BrowserRefresh"), 0xA9 => Some("BrowserStop"),
+        0xAA => Some("BrowserSearch"), 0xAB => Some("BrowserFavorites"),
+        0xAC => Some("BrowserHome"), 0xAD => Some("VolumeMute"),
+        0xAE => Some("VolumeDown"), 0xAF => Some("VolumeUp"),
+        0xB0 => Some("MediaNextTrack"), 0xB1 => Some("MediaPreviousTrack"),
+        0xB2 => Some("MediaStop"), 0xB3 => Some("MediaPlayPause"),
+        0xBA => Some("Oem1"), 0xBB => Some("OemPlus"), 0xBC => Some("OemComma"),
+        0xBD => Some("OemMinus"), 0xBE => Some("OemPeriod"), 0xBF => Some("Oem2"),
+        0xC0 => Some("Oem3"), 0xDB => Some("Oem4"), 0xDC => Some("Oem5"),
+        0xDD => Some("Oem6"), 0xDE => Some("Oem7"), 0xDF => Some("Oem8"),
+        0xE2 => Some("Oem102"),
+        _ => None,
+    };
+    if let Some(n) = named { return n.to_string(); }
     match vk {
-        0x08 => "Backspace".into(), 0x09 => "Tab".into(), 0x0D => "Enter".into(),
-        0x1B => "Escape".into(), 0x20 => "Space".into(),
-        0x21 => "PageUp".into(), 0x22 => "PageDown".into(),
-        0x23 => "End".into(), 0x24 => "Home".into(),
-        0x25 => "Left".into(), 0x26 => "Up".into(), 0x27 => "Right".into(), 0x28 => "Down".into(),
-        0x2D => "Insert".into(), 0x2E => "Delete".into(),
-        0x70..=0x7B => format!("F{}", vk - 0x6F),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
         0x41..=0x5A => ((vk as u8) as char).to_string(),
-        0x30..=0x39 => format!("D{}", (vk as u8 as char)),
+        0x30..=0x39 => format!("D{}", vk as u8 as char),
         0x60..=0x69 => format!("NumPad{}", vk - 0x60),
-        0x10 | 0x11 | 0x12 | 0x5B | 0x5C => String::new(), // 纯修饰键不记
-        _ => raw.trim().replace(' ', ""),
+        // 纯修饰键不记（对应上游排除 LeftCtrl/RightAlt/… 的逻辑）
+        0x10 | 0x11 | 0x12 | 0x5B | 0x5C | 0xA0..=0xA5 => String::new(),
+        _ => String::new(),
     }
 }
 
@@ -365,7 +411,7 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => {
             match id {
-                ID_MINIMIZE => unsafe { ShowWindow(hwnd, SW_HIDE); },
+                ID_MINIMIZE => unsafe { ShowWindow(hwnd, SW_MINIMIZE); },
                 ID_CLOSE => app::hide_control_panel(true),
                 ID_TAB_CONTROLS | ID_TAB_SCHEDULE | ID_TAB_HOTKEYS | ID_TAB_OPTIONS =>
                     set_tab(id - ID_TAB_CONTROLS, ctx, hwnd),
@@ -393,9 +439,9 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
                         app::app().settings.saved_schedules.remove(real);
                         app::trigger_save();
                         relayout(ctx, hwnd);
-                    } else {
-                        dialogs::show_schedule(Some(real));
                     }
+                    // 上游单击只改变 SelectedItem；打开编辑器需要双击或 Enter
+
                 }
                 _ => {}
             }
@@ -403,7 +449,10 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         Event::Check(id, v) => {
             let a = app::app();
             match id {
-                ID_SCHEDULE_CHECK => a.settings.schedule_toggle = v,
+                ID_SCHEDULE_CHECK => {
+                    a.settings.schedule_toggle = v;
+                    if v { app::evaluate_missed_schedules(true); }
+                }
                 ID_HOTKEY_CHECK => a.settings.hotkeys_enabled = v,
                 ID_STARTUP_CHECK => { set_auto_start(v); return; }
                 ID_SHOWSTARTUP_CHECK => a.settings.show_on_startup = v,
@@ -441,7 +490,8 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
             if (ID_TAB_CONTROLS..=ID_TAB_OPTIONS).contains(&id) {
                 // 对应 TabsArea_MouseWheel：滚轮切换 Tab
                 let cur = unsafe { CURRENT_TAB };
-                let next = if delta > 0 { (cur + 4 - 1) % 4 } else { (cur + 1) % 4 };
+                // 对应 TabsArea_MouseWheel：滚轮向上(Delta>0)切到下一个 Tab
+                let next = if delta > 0 { (cur + 1) % 4 } else { (cur + 4 - 1) % 4 };
                 set_tab(next, ctx, hwnd);
             } else if id == ID_SLIDER {
                 app::app().last_user_interaction = app::now_ms();
@@ -463,31 +513,37 @@ pub fn on_control_panel(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         Event::Key(_, vk) => {
             match vk {
                 VK_LEFT | VK_RIGHT => {
-                    // 对应 MainTabs_PreviewKeyDown
-                    let cur = unsafe { CURRENT_TAB };
-                    let next = if vk == VK_LEFT { (cur + 4 - 1) % 4 } else { (cur + 1) % 4 };
-                    set_tab(next, ctx, hwnd);
-                }
-                VK_UP | VK_DOWN => {
-                    let len = app::app().settings.saved_schedules.len();
-                    if len > 0 {
-                        let cur = ctx.ui.selected_row.unwrap_or(0) as i32;
-                        ctx.ui.selected_row = Some((cur + if vk == VK_DOWN { 1 } else { -1 })
-                            .clamp(0, len as i32 - 1) as usize);
+                    // 对应 MainTabs_PreviewKeyDown：只有焦点在 Tab 头部时才切页
+                    let on_tab = ctx.ui.focus
+                        .and_then(|id| ctx.ui.get(id).map(|w| matches!(w.kind, Kind::Tab(..))))
+                        .unwrap_or(false);
+                    if on_tab {
+                        let cur = unsafe { CURRENT_TAB };
+                        let next = if vk == VK_LEFT { (cur + 4 - 1) % 4 } else { (cur + 1) % 4 };
+                        set_tab(next, ctx, hwnd);
                     }
                 }
-                VK_DELETE => {
+                VK_UP | VK_DOWN if unsafe { CURRENT_TAB } == 1 => {
+                    // 对应 ListBox 键盘导航：沿「显示顺序」移动，并把新选中项滚入可视区
+                    let order = sorted_schedule_indices(&app::app().settings.saved_schedules);
+                    if !order.is_empty() {
+                        let pos = ctx.ui.selected_row
+                            .and_then(|r| order.iter().position(|&i| i == r))
+                            .unwrap_or(0);
+                        let np = if vk == VK_DOWN { (pos + 1).min(order.len() - 1) }
+                                 else { pos.saturating_sub(1) };
+                        let real = order[np];
+                        ctx.ui.selected_row = Some(real);
+                        ensure_row_visible(hwnd, ctx, real, &order);
+                    }
+                }
+                VK_RETURN | VK_SPACE if unsafe { CURRENT_TAB } == 1 => {
+                    // 对应 ScheduleList_PreviewKeyDown：Enter/Space 编辑选中日程
                     if let Some(real) = ctx.ui.selected_row {
                         if real < app::app().settings.saved_schedules.len() {
-                            app::app().settings.saved_schedules.remove(real);
-                            app::trigger_save();
-                            ctx.ui.selected_row = None;
-                            relayout(ctx, hwnd);
+                            dialogs::show_schedule(Some(real));
                         }
                     }
-                }
-                VK_RETURN | VK_SPACE => {
-                    if let Some(real) = ctx.ui.selected_row { dialogs::show_schedule(Some(real)); }
                 }
                 _ => {}
             }
@@ -527,7 +583,7 @@ pub fn layout_tray_menu(ctx: &mut WindowCtx, w: i32, _h: i32) {
     ctx.ui.widgets.push(mk(ID_MENU_EXIT, 4, 210, w - 8, 26, Kind::Button("Exit".into())));
 }
 
-pub fn on_tray_menu(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
+pub fn on_tray_menu(ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
     match ev {
         Event::Click(id) => match id {
             ID_MENU_CONTROLS => { unsafe { ShowWindow(hwnd, SW_HIDE); } app::remove_mouse_hook(); app::show_control_panel(); }
@@ -545,6 +601,27 @@ pub fn on_tray_menu(_ctx: &mut WindowCtx, ev: Event, hwnd: HWND) {
         Event::Wheel(id, _d) => {
             if id == ID_MENU_SLIDER { let v = app::app().current_brightness; app::apply_brightness(v, false, false, 0, false); }
         }
+        Event::Key(_, vk) if vk == VK_UP || vk == VK_DOWN => {
+            // 对应 TrayMenuWindow.PreviewKeyDown：上下键按 5% 网格调亮度，Ctrl 精确 ±1%
+            let cur = (app::app().current_brightness * 100.0).round() as i32;
+            let fine = unsafe { GetAsyncKeyState(VK_CONTROL) != 0 };
+            let mut pct = if fine {
+                cur + if vk == VK_UP { 1 } else { -1 }
+            } else if vk == VK_UP {
+                let n = ((cur + 4) / 5) * 5;
+                if n == cur { n + 5 } else { n }
+            } else {
+                ((cur - 1) / 5) * 5
+            };
+            pct = pct.clamp(1, 100);
+            let v = pct as f64 / 100.0;
+            ctx.ui.set_value(ID_MENU_SLIDER, v);
+            ctx.ui.set_text(ID_MENU_VALUE, &format!("{}%", pct));
+            app::app().settings.last_opacity = v;
+            app::trigger_save();
+            // 键盘改值走非拖动分支 → 动画（对应 MenuSlider_ValueChanged 的 else 分支）
+            app::apply_brightness(v, true, false, 200, false);
+        }
         _ => {}
     }
 }
@@ -560,7 +637,8 @@ pub fn show_tray_menu() {
         ui::relayout_public(ctx, cr.width(), cr.height());
     }
     unsafe {
-        // 对应 GetTrayIconScreenPosition + TrayMenuWindow 的任务栏方位定位
+        // 对应 TrayMenuWindow.Window_IsVisibleChanged 的任务栏方位定位：
+        // 视觉边缘与工作区保持 12px（Win11 原生菜单间距）；图标在「隐藏的图标」浮出窗口里时贴光标弹出。
         let icon = app::tray_icon_position();
         let mon = MonitorFromPoint(icon, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFOEXW::default();
@@ -568,23 +646,41 @@ pub fn show_tray_menu() {
         let (work, screen) = if mon != NULL && GetMonitorInfoW(mon, &mut mi) != 0 {
             (mi.rcWork, mi.rcMonitor)
         } else {
-            (RECT::new(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)),
-             RECT::new(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)))
+            let r = RECT::new(0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+            (r, r)
         };
         let (cw, ch) = (cr.width(), cr.height());
-        let (mut x, mut y) = if work.top > screen.top {
-            (icon.x - cw / 2, work.top)
-        } else if work.left > screen.left {
-            (work.left, icon.y - ch / 2)
-        } else if work.right < screen.right {
-            (work.right - cw, icon.y - ch / 2)
+        let sc = app::app().scale;
+        let gap = (12.0 * sc).round() as i32;   // 任务栏边缘间距
+        let tip = (2.0 * sc).round() as i32;    // 溢出菜单贴光标
+        let lift = (8.0 * sc).round() as i32;   // 左右任务栏时菜单底边与光标的关系
+        let is_top = work.top > screen.top;
+        let is_left = work.left > screen.left;
+        let is_right = work.right < screen.right;
+        // 光标落在工作区内 → 图标在溢出浮出窗口里
+        let in_overflow = icon.x >= work.left && icon.x <= work.right
+            && icon.y >= work.top && icon.y <= work.bottom;
+        let (mut x, mut y) = if in_overflow {
+            if is_right { (icon.x - cw - tip, icon.y - ch - tip) }
+            else if is_top { (icon.x + tip, icon.y + tip) }
+            else { (icon.x + tip, icon.y - ch - tip) }
+        } else if is_left {
+            (work.left + gap, icon.y - ch - lift)
+        } else if is_right {
+            (work.right - cw - gap, icon.y - ch - lift)
+        } else if is_top {
+            (icon.x - cw / 2, work.top + gap)
         } else {
-            (icon.x - cw / 2, work.bottom - ch)
+            (icon.x - cw / 2, work.bottom - ch - gap)
         };
-        x = x.clamp(work.left, (work.right - cw).max(work.left));
-        y = y.clamp(work.top, (work.bottom - ch).max(work.top));
+        // 最终夹紧用显示器整块区域，允许阴影区进入任务栏空间
+        x = x.clamp(screen.left, (screen.right - cw).max(screen.left));
+        y = y.clamp(screen.top, (screen.bottom - ch).max(screen.top));
         SetWindowPos(h, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-        ShowWindow(h, SW_SHOWNA);
+        ShowWindow(h, SW_SHOW);
+        // 对应 Activate() + Focus()：失去焦点才能触发 Window_Deactivated 自动收起
+        SetForegroundWindow(h);
+        SetFocus(h);
     }
     // 对应 HandleTrayMenuToggle：菜单显示时清空 ToolTip，隐藏时恢复
     app::tray_tip(app::app().hwnd_controller, "");

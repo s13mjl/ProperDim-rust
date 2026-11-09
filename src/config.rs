@@ -207,7 +207,7 @@ impl Default for AppSettings {
             control_panel_left: -1.0, control_panel_top: -1.0,
             control_panel_width: 350.0, control_panel_height: 200.0,
             schedule_dialog_width: 320.0, schedule_dialog_height: 280.0,
-            app_info_window_width: 320.0, app_info_window_height: 394.0,
+            app_info_window_width: 320.0, app_info_window_height: 384.0,
             warning_message_width: 300.0, warning_message_height: 150.0,
             min_brightness_dialog_width: 300.0, min_brightness_dialog_height: 260.0,
             last_opacity: 1.0, saved_schedules: Vec::new(), use_military_time: false,

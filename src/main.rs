@@ -75,6 +75,7 @@ fn main() {
             save_pending: false,
             edit_schedule_index: None, warning_action: WarningAction::None,
             warning_result: None,             anim: AnimState::default(),
+            anim_updating: false,
             monitors: Vec::new(), tray_added: false,
             extra: extra_apis, hook: NULL, wts_registered: false, modal_depth: 0,
         };

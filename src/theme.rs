@@ -223,8 +223,10 @@ impl Ui {
             scroll_offset: 0, selected_row: None, slider_click: false }
     }
     pub fn clear(&mut self) {
+        // 注意：scroll_offset / selected_row 是「视图状态」而不是控件状态，
+        // 重建控件树时不能清零，否则每次重排都会把列表滚回顶部（上游 ListBox 不会）。
         self.widgets.clear(); self.hover = None; self.focus = None;
-        self.scroll_offset = 0; self.selected_row = None; self.slider_click = false;
+        self.slider_click = false;
     }
     pub fn get(&self, id: u32) -> Option<&Widget> { self.widgets.iter().find(|w| w.id == id && w.visible) }
     pub fn get_mut(&mut self, id: u32) -> Option<&mut Widget> { self.widgets.iter_mut().find(|w| w.id == id) }
@@ -277,7 +279,26 @@ impl Ui {
         for w in &self.widgets {
             if !w.visible { continue; }
             draw_widget(p, w);
+            if Some(w.id) == self.focus {
+                // 对应 WPF 的 FocusVisualStyle：虚线焦点框
+                let r = RECT::new(w.rect.left + 1, w.rect.top + 1, w.rect.right - 1, w.rect.bottom - 1);
+                unsafe { DrawFocusRect(p.dc, &r); }
+            }
         }
+    }
+
+    /// 对应 WPF 的 Tab / Shift+Tab 焦点遍历（按控件创建顺序）。
+    pub fn focus_next(&mut self, back: bool) {
+        let ids: Vec<u32> = self.widgets.iter()
+            .filter(|w| w.visible && w.enabled && focusable(&w.kind))
+            .map(|w| w.id).collect();
+        if ids.is_empty() { return; }
+        let cur = self.focus.and_then(|f| ids.iter().position(|&i| i == f));
+        let next = match cur {
+            None => if back { ids.len() - 1 } else { 0 },
+            Some(p) => if back { (p + ids.len() - 1) % ids.len() } else { (p + 1) % ids.len() },
+        };
+        self.focus = Some(ids[next]);
     }
 
     pub fn mouse_down(&mut self, x: i32, y: i32) -> Event {
@@ -288,6 +309,7 @@ impl Ui {
         };
         let id = self.widgets[i].id;
         let kind = self.widgets[i].kind.clone();
+        if focusable(&kind) { self.focus = Some(id); }
         match kind {
             Kind::Slider { min, max, vertical, .. } => {
                 self.capture = Some(id);
@@ -297,9 +319,14 @@ impl Ui {
                 self.set_value(id, v);
                 Event::Value(id, v)
             }
-            Kind::CheckBox(_, b) | Kind::DayBox(_, b) | Kind::Radio(_, b) => {
+            Kind::CheckBox(_, b) | Kind::DayBox(_, b) => {
                 self.set_checked(id, !b);
                 Event::Check(id, !b)
+            }
+            // 单选按钮（AM/PM）不自行反选：由窗口层维护互斥组（对应 RadioButton GroupName 行为）
+            Kind::Radio(..) => {
+                self.set_checked(id, true);
+                Event::Click(id)
             }
             Kind::TextBox(_) | Kind::Combo(_) => {
                 self.focus = Some(id);
@@ -331,25 +358,48 @@ impl Ui {
     }
     pub fn mouse_up(&mut self, _x: i32, _y: i32) -> Event {
         self.capture = None;
+        // 对应 _isDragging = false：松手后滚轮/键盘改值恢复为动画分支
+        self.slider_click = false;
         Event::None
     }
     pub fn wheel(&mut self, x: i32, y: i32, delta: i32) -> Event {
         let Some(i) = self.hit(x, y) else { return Event::None; };
         let id = self.widgets[i].id;
-        // 对应 DimmerSlider_MouseWheel / MinSlider_MouseWheel：
-        // 常规 ±5%，Ctrl 或右键按 ±1%；小范围滑块（如最小亮度 0.01–0.40）固定 ±1%
-        let fine = unsafe { GetAsyncKeyState(VK_CONTROL) != 0 || GetAsyncKeyState(0x02) != 0 };
-        let (min, max, value, is_slider) = match &self.widgets[i].kind {
-            Kind::Slider { min, max, value, .. } => (*min, *max, *value, true),
-            _ => (0.0, 0.0, 0.0, false),
+        // 对应 DimmerSlider_MouseWheel / MenuSlider 全局滚轮：
+        //   Ctrl 或右键按住 → ±1%；否则按 5% 网格吸附（((cur+4)/5)*5，向上恰好等于当前值时 +5）
+        // 对应 ScheduleDialog/MinDialog：固定 ±1%（以 tag="fine" 标记）
+        let fine_key = unsafe { GetAsyncKeyState(VK_CONTROL) != 0 || GetAsyncKeyState(0x02) != 0 };
+        let (min, max, value, tag) = match &self.widgets[i].kind {
+            Kind::Slider { min, max, value, .. } => (*min, *max, *value, self.widgets[i].tag.clone()),
+            _ => return Event::Wheel(id, delta),
         };
-        if !is_slider { return Event::Wheel(id, delta); }
-        let mag = if (max - min) < 0.5 { 0.01 } else if fine { 0.01 } else { 0.05 };
-        let step = if delta > 0 { mag } else { -mag };
-        let v = (value + step).clamp(min, max);
+        let v = if tag == "fine" {
+            let step = if delta > 0 { 0.01 } else { -0.01 };
+            (value + step).clamp(min, max)
+        } else {
+            let cur = (value * 100.0).round() as i32;
+            let mut pct = if fine_key {
+                if delta > 0 { cur + 1 } else { cur - 1 }
+            } else if delta > 0 {
+                let n = ((cur + 4) / 5) * 5;
+                if n == cur { n + 5 } else { n }
+            } else {
+                ((cur - 1) / 5) * 5
+            };
+            let lo = (min * 100.0).round() as i32;
+            let hi = (max * 100.0).round() as i32;
+            pct = pct.clamp(lo, hi);
+            pct as f64 / 100.0
+        };
         self.set_value(id, v);
         Event::Value(id, v)
     }
+}
+
+/// 对应 WPF 中可接受键盘焦点的元素（Label / 装饰元素不可聚焦）。
+fn focusable(k: &Kind) -> bool {
+    !matches!(k, Kind::Label(..) | Kind::BoldLabel(..) | Kind::IconBox
+        | Kind::Separator | Kind::ResizeGrip)
 }
 
 fn slider_value(r: RECT, x: i32, y: i32, min: f64, max: f64, vertical: bool) -> f64 {
@@ -537,5 +587,51 @@ pub fn apply_round_region(hwnd: HWND, w: i32, h: i32, radius: i32) {
     unsafe {
         let rgn = CreateRoundRectRgn(0, 0, w, h, radius * 2, radius * 2);
         if rgn != NULL { SetWindowRgn(hwnd, rgn, TRUE); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slider(min: f64, max: f64, value: f64, tag: &str) -> Ui {
+        let mut ui = Ui::new();
+        let mut w = Widget::new(1, RECT::new(0, 0, 100, 20),
+            Kind::Slider { min, max, value, vertical: false });
+        w.tag = tag.to_string();
+        ui.widgets.push(w);
+        ui
+    }
+
+    #[test]
+    fn wheel_snaps_to_five_percent_grid() {
+        // 对应 DimmerSlider_MouseWheel：((cur+4)/5)*5，47 → 50
+        let mut ui = slider(0.01, 1.0, 0.47, "");
+        match ui.wheel(50, 10, 120) {
+            Event::Value(_, v) => assert!((v - 0.50).abs() < 1e-9, "{}", v),
+            other => panic!("{:?}", other),
+        }
+        // 向下：47 → 45
+        ui.set_value(1, 0.47);
+        match ui.wheel(50, 10, -120) {
+            Event::Value(_, v) => assert!((v - 0.45).abs() < 1e-9, "{}", v),
+            other => panic!("{:?}", other),
+        }
+        // 已是网格点时向上必须前进一格：50 → 55
+        ui.set_value(1, 0.50);
+        match ui.wheel(50, 10, 120) {
+            Event::Value(_, v) => assert!((v - 0.55).abs() < 1e-9, "{}", v),
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn fine_slider_uses_one_percent() {
+        // 对应 ScheduleDialog/MinDialog：滚轮固定 ±1%，与总跨度无关
+        let mut ui = slider(0.01, 0.40, 0.30, "fine");
+        match ui.wheel(50, 10, 120) {
+            Event::Value(_, v) => assert!((v - 0.31).abs() < 1e-9, "{}", v),
+            other => panic!("{:?}", other),
+        }
     }
 }

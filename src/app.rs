@@ -59,6 +59,8 @@ pub struct App {
     pub warning_action: WarningAction,
     pub warning_result: Option<bool>,
     pub anim: AnimState,
+    /// 对应 `MainWindow._isUpdatingFromAnimator`：为 true 时表示本次 ApplyBrightness 来自动画帧。
+    pub anim_updating: bool,
     pub monitors: Vec<MonitorInfo>,
     pub tray_added: bool,
     pub extra: ExtraApis,
@@ -262,6 +264,8 @@ pub fn show_control_panel() {
     if a.hwnd_panel == NULL { a.hwnd_panel = ui::panels::create_control_panel(a.instance); }
     let h = a.hwnd_panel;
     if h == NULL { return; }
+    // 对应 ShowControlPanel：每次显示都把 Tab 归零（Dispatcher.BeginInvoke(ApplicationIdle)）
+    ui::panels::reset_panel_state(h);
     // 对应 ControlPanel_IsVisibleChanged / SyncSliderWithOpacity / OnActivated
     ui::panels::sync_brightness(h, a.current_brightness);
     refresh_panel_list();
@@ -296,27 +300,42 @@ pub fn hide_control_panel(handle_closure: bool) {
 // ---------------------------------------------------------------------------
 pub fn apply_brightness(logical: f64, animate: bool, ignore_minimum: bool, duration_ms: u64, linear: bool) {
     let a = app();
-    let l = logical.clamp(0.0, 1.0);
-    if animate {
-        let from = a.current_brightness;
-        if (from - l).abs() > 0.001 {
-            a.anim = AnimState {
-                active: true, from, to: l, start: now_ms(), duration_ms: duration_ms.max(1),
-                linear, ignore_minimum,
-            };
-            unsafe { SetTimer(a.hwnd_controller, TIMER_ANIM, 16, std::ptr::null()); }
-            return;
-        }
-    }
-    a.anim.active = false;
-    a.current_brightness = l;
+    // 对应 ApplyBrightness 第 1 步：不忽略最小值时逻辑亮度下限是 0.01（Math.Max(0.01, ...)）
+    let l = if ignore_minimum { logical.clamp(0.0, 1.0) } else { logical.clamp(0.01, 1.0) };
     let min = a.settings.global_minimum;
-    a.backend.apply_brightness(l, min, ignore_minimum);
-    a.last_hardware = if ignore_minimum { l } else {
-        let floor = min.clamp(0.0, 1.0);
-        floor + ((l.clamp(0.01, 1.0) - 0.01) / 0.99) * (1.0 - floor)
+    // 第 2 步：逻辑 → 硬件映射（activeFloor 只在忽略最小值时为 0）
+    let floor = if ignore_minimum { 0.0 } else { min.clamp(0.0, 1.0) };
+    let target_hardware = if ignore_minimum {
+        l
+    } else {
+        floor + ((l - 0.01) / 0.99) * (1.0 - floor)
     };
-    set_tooltip_brightness();
+    if animate && (target_hardware - a.last_hardware).abs() > 0.001 {
+        // 对应：把当前「硬件」亮度折算回新的逻辑坐标系，动画从屏幕真实位置起步
+        let mut from = if ignore_minimum {
+            a.last_hardware
+        } else if 1.0 - floor <= 0.0 {
+            1.0
+        } else {
+            0.01 + ((a.last_hardware - floor) / (1.0 - floor)) * 0.99
+        };
+        from = from.clamp(0.0, 1.0);
+        a.anim = AnimState {
+            active: true, from, to: l, start: now_ms(), duration_ms: duration_ms.max(1),
+            linear, ignore_minimum,
+        };
+        unsafe { SetTimer(a.hwnd_controller, TIMER_ANIM, 16, std::ptr::null()); }
+        return;
+    }
+    // 对应 if (!_isUpdatingFromAnimator) _gammaAnimator.Stop();
+    // 动画每帧回调时不能停掉正在跑的动画，否则只会应用第一帧
+    if !a.anim_updating { a.anim.active = false; }
+    a.current_brightness = l;
+    a.last_hardware = target_hardware;
+    a.backend.apply_brightness(l, min, ignore_minimum);
+    // 对应：动画回调期间不刷 ToolTip；QuickDim 可见时也不刷
+    let menu_visible = a.hwnd_tray_menu != NULL && unsafe { IsWindowVisible(a.hwnd_tray_menu) } != 0;
+    if !a.anim_updating && !menu_visible { set_tooltip_brightness(); }
     if a.hwnd_panel != NULL {
         if !a.preview_isolated && now_ms() - a.last_user_interaction >= 500 {
             ui::panels::sync_brightness(a.hwnd_panel, l);
@@ -339,7 +358,9 @@ pub fn anim_tick() {
     let ignore = a.anim.ignore_minimum;
     let done = t >= 1.0;
     if done { a.anim.active = false; }
+    a.anim_updating = true;
     apply_brightness(v, false, ignore, 0, false);
+    app().anim_updating = false;
     if done {
         let a = app();
         apply_brightness(a.anim.to, false, ignore, 0, false);
@@ -378,14 +399,29 @@ pub fn start_preview(v: f64) {
     a.preview_isolated = true;
     a.backend.set_preview(v);
 }
+/// 对应 `ControlPanel.ApplyPreview(value, animate:false)`：拖动预览时连续改写，不重置还原点。
+pub fn preview_value(v: f64) {
+    let a = app();
+    if !a.preview_active {
+        a.preview_restore = a.current_brightness;
+        a.preview_active = true;
+    }
+    a.preview_isolated = true;
+    a.backend.set_preview(v);
+}
 pub fn stop_preview() {
     let a = app();
     if !a.preview_active { return; }
     a.preview_active = false;
     a.preview_isolated = false;
-    let restore = a.preview_restore;
+    // 对应 EndPreview：动态读取当前设置，热键在预览期间调过亮度也能被尊重
+    let restore = a.settings.last_opacity;
     let min = a.settings.global_minimum;
     a.backend.restore_preview(restore, min);
+    let logical = restore.clamp(0.01, 1.0);
+    let floor = min.clamp(0.0, 1.0);
+    a.current_brightness = logical;
+    a.last_hardware = floor + ((logical - 0.01) / 0.99) * (1.0 - floor);
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +590,11 @@ pub fn shutdown_app() {
     let a = app();
     if a.is_shutting_down { return; }
     a.is_shutting_down = true;
+    // 对应 ShutdownApp：先关掉 QuickDim 菜单，避免隐藏时回调再触碰已销毁对象
+    if a.hwnd_tray_menu != NULL {
+        unsafe { ShowWindow(a.hwnd_tray_menu, SW_HIDE); }
+        remove_mouse_hook();
+    }
     if a.tray_added { tray_remove(a.hwnd_controller); }
     config::save(&a.settings);
     a.backend.shutdown();
@@ -743,6 +784,58 @@ pub fn handle_end_session() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::StubBackend;
+
+    /// 构造一个只跑亮度逻辑的最小 App（无窗口、Stub 后端）。
+    fn test_app() {
+        let a = App {
+            settings: AppSettings::default(),
+            backend: Box::new(StubBackend::new()),
+            demo: true, icon: NULL, scale: 1.0, instance: NULL,
+            hwnd_controller: NULL, hwnd_panel: NULL, hwnd_tray_menu: NULL,
+            hwnd_schedule: NULL, hwnd_min: NULL, hwnd_info: NULL, hwnd_warning: NULL,
+            current_brightness: 1.0, last_hardware: 1.0, locked_hardware: 1.0,
+            last_triggered: (-1, -1), last_hotkey_tick: 0, last_toggle_tick: 0,
+            last_menu_close_tick: 0, is_shutting_down: false,
+            preview_active: false, preview_restore: 1.0,
+            preview_isolated: false, last_user_interaction: 0, save_pending: false,
+            edit_schedule_index: None, warning_action: WarningAction::None,
+            warning_result: None, anim: AnimState::default(), anim_updating: false,
+            monitors: Vec::new(), tray_added: false,
+            extra: ExtraApis {
+                dwm_set: None, dpi_for_monitor: None, wts_register: None,
+                wts_unregister: None, package_full_name: None,
+            },
+            hook: NULL, wts_registered: false, modal_depth: 0,
+        };
+        init(a);
+    }
+
+    /// 两个场景共用全局 APP，必须放在同一个测试里串行执行。
+    #[test]
+    fn brightness_pipeline() {
+        // 1) 动画必须真正跑到终点，而不是停在第一帧
+        test_app();
+        apply_brightness(0.5, true, false, 150, false);
+        assert!(app().anim.active, "动画应已启动");
+        let start = now_ms();
+        while app().anim.active && now_ms() - start < 2000 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            anim_tick();
+        }
+        assert!(!app().anim.active, "动画必须在超时前结束");
+        assert!((app().current_brightness - 0.5).abs() < 1e-6,
+            "最终亮度应为 0.5，实际 {}", app().current_brightness);
+
+        // 2) 传入 0.0 时逻辑亮度必须收敛到 0.01，硬件亮度落在 floor 上
+        test_app();
+        app().settings.global_minimum = 0.40;
+        apply_brightness(0.0, false, false, 0, false);
+        assert!((app().current_brightness - 0.01).abs() < 1e-9);
+        assert!((app().last_hardware - 0.40).abs() < 1e-9,
+            "硬件应为最低亮度 0.40，实际 {}", app().last_hardware);
+    }
+
     #[test]
     fn civil_date_math() {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
