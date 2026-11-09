@@ -45,11 +45,13 @@ struct GdiCache {
     fonts: HashMap<i32, HFONT>,
     brushes: HashMap<u32, HBRUSH>,
     pens: HashMap<(u32, i32), HPEN>,
+    dash_pens: HashMap<u32, HPEN>,
     back: Option<(HDC, HBITMAP, isize, i32, i32)>,
 }
 thread_local! {
     static CACHE: std::cell::RefCell<GdiCache> = std::cell::RefCell::new(GdiCache {
-        fonts: HashMap::new(), brushes: HashMap::new(), pens: HashMap::new(), back: None,
+        fonts: HashMap::new(), brushes: HashMap::new(), pens: HashMap::new(),
+        dash_pens: HashMap::new(), back: None,
     });
 }
 
@@ -77,6 +79,18 @@ fn cached_brush(color: COLORREF) -> HBRUSH {
         let b = unsafe { CreateSolidBrush(color) };
         c.brushes.insert(key, b);
         b
+    })
+}
+
+/// 虚线画笔（`GrayFocusVisual` 用 PS_DOT）。
+fn cached_dash_pen(color: COLORREF) -> HPEN {
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = color as u32;
+        if let Some(&p) = c.dash_pens.get(&key) { return p; }
+        let p = unsafe { CreatePen(PS_DOT, 1, color) };
+        c.dash_pens.insert(key, p);
+        p
     })
 }
 
@@ -196,6 +210,20 @@ impl Painter {
     }
 }
 
+/// 画一个 1px 虚线矩形（对应 XAML `Rectangle StrokeDashArray="1 2"`）。
+fn dashed_frame(dc: HDC, r: &RECT, color: COLORREF) {
+    unsafe {
+        let pen = cached_dash_pen(color);
+        let old = SelectObject(dc, pen as HGDIOBJ);
+        let (l, t, rr, b) = (r.left, r.top, r.right - 1, r.bottom - 1);
+        MoveToEx(dc, l, t, std::ptr::null_mut()); LineTo(dc, rr, t);
+        LineTo(dc, rr, b);
+        LineTo(dc, l, b);
+        LineTo(dc, l, t);
+        SelectObject(dc, old);
+    }
+}
+
 /// GDI 没有 FrameRect 的独立声明，这里用四个 1px 矩形实现描边。
 fn frame_with_brush(dc: HDC, r: &RECT, br: HBRUSH) {
     unsafe {
@@ -271,6 +299,9 @@ pub struct Ui {
     pub focus: Option<u32>,
     /// 已被按下、等待松开才触发 Click 的控件（对应 WPF 按钮在 MouseUp 时触发 Click）
     pub pressed: Option<u32>,
+    /// 焦点是否来自键盘（Tab）。WPF 的 FocusVisualStyle 只在键盘聚焦时显示，
+    /// 鼠标点击不显示——否则会出现一圈难看的白框。
+    pub focus_visible: bool,
     pub scroll_offset: i32,
     pub selected_row: Option<usize>,
     /// true = 滑块点击（对应 Slider_ValueChanged 的非拖动分支，需要动画）；false = 拖动中。
@@ -279,7 +310,7 @@ pub struct Ui {
 impl Ui {
     pub fn new() -> Self {
         Ui { widgets: Vec::new(), capture: None, hover: None, focus: None, pressed: None,
-            scroll_offset: 0, selected_row: None, slider_click: false }
+            focus_visible: false, scroll_offset: 0, selected_row: None, slider_click: false }
     }
     pub fn clear(&mut self) {
         // 注意：scroll_offset / selected_row 是「视图状态」而不是控件状态，
@@ -338,10 +369,11 @@ impl Ui {
         for w in &self.widgets {
             if !w.visible { continue; }
             draw_widget(p, w);
-            if Some(w.id) == self.focus {
-                // 对应 WPF 的 FocusVisualStyle：虚线焦点框
-                let r = RECT::new(w.rect.left + 1, w.rect.top + 1, w.rect.right - 1, w.rect.bottom - 1);
-                unsafe { DrawFocusRect(p.dc, &r); }
+            if self.focus_visible && Some(w.id) == self.focus {
+                // 对应 App.xaml 的 GrayFocusVisual：
+                // Rectangle Margin="-2" StrokeThickness="1" Stroke="#888888" StrokeDashArray="1 2"
+                let r = RECT::new(w.rect.left - 2, w.rect.top - 2, w.rect.right + 2, w.rect.bottom + 2);
+                dashed_frame(p.dc, &r, rgb(0x88, 0x88, 0x88));
             }
         }
     }
@@ -358,17 +390,21 @@ impl Ui {
             Some(p) => if back { (p + ids.len() - 1) % ids.len() } else { (p + 1) % ids.len() },
         };
         self.focus = Some(ids[next]);
+        self.focus_visible = true;
     }
 
     pub fn mouse_down(&mut self, x: i32, y: i32) -> Event {
         let Some(i) = self.hit(x, y) else {
             // 对应 HotkeysTab_MouseDown：点击空白处夺走 TextBox 焦点
             self.focus = None;
+            self.focus_visible = false;
             return Event::None;
         };
         let id = self.widgets[i].id;
         let kind = self.widgets[i].kind.clone();
         if focusable(&kind) { self.focus = Some(id); }
+        // 鼠标点击不显示焦点框（对应 WPF 只在 ShowKeyboardCues 为真时显示 FocusVisualStyle）
+        self.focus_visible = false;
         // 对应 WPF：Button / Hyperlink 在 MouseUp 时才 Click。
         // 原来按下就触发，导致「点 Cool 时窗口在还没点完就消失」。
         if matches!(kind, Kind::Button(_) | Kind::RedButton(_) | Kind::CloseButton(_) | Kind::Link(..)) {

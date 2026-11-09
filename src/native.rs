@@ -163,6 +163,7 @@ pub const IDC_HAND: *const u16 = 32649 as *const u16;
 pub const IDC_SIZENWSE: *const u16 = 32642 as *const u16;
 
 // ---- GDI ----
+pub const PS_DOT: i32 = 2;
 pub const PS_SOLID: i32 = 0;
 pub const TRANSPARENT: i32 = 1;
 pub const OPAQUE: i32 = 2;

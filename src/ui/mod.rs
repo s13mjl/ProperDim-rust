@@ -263,6 +263,8 @@ pub unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lp
             if msg == WM_KEYDOWN && vk == VK_TAB {
                 let back = unsafe { GetAsyncKeyState(VK_SHIFT) != 0 };
                 ctx.ui.focus_next(back);
+                // 焦点框是画出来的，切换焦点后必须重绘
+                InvalidateRect(hwnd, std::ptr::null(), FALSE);
                 return 0;
             }
             // 对应 App.xaml.cs 的 RegisterClassHandler：CheckBox(Enter) / Hyperlink(Enter+Space)
