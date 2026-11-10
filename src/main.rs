@@ -90,8 +90,11 @@ fn main() {
     };
 
     let controller_ctx = ui::WindowCtx::new(WindowKind::Controller, "", false);
+    // This window is never shown (it only receives tray / hotkey / timer messages), so
+    // WS_EX_TOOLWINDOW is enough. Never add WS_EX_LAYERED: a layered window without
+    // LayeredWindowAttributes is fully transparent.
     let controller = ui::create_window(&cls, "ProperDim Controller", 0, 0, 0, 0,
-        WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED, controller_ctx, false);
+        WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT, controller_ctx, false);
     if controller == NULL {
         unsafe {
             let t = wide("Startup Error: failed to create controller window");
@@ -151,6 +154,12 @@ fn main() {
 
     // 7. 按配置显示控制面板（对应 ShowOnStartup）
     if app::app().settings.show_on_startup { app::show_control_panel(); }
+
+    // Debug switch: pop up the QuickDim panel immediately on launch (for verifying the
+    // popup without having to click the tray icon).
+    if args.iter().any(|a| a.eq_ignore_ascii_case("--quickdim")) {
+        ui::panels::show_tray_menu();
+    }
 
     // 8. 消息循环（对应 WPF Dispatcher）
     //

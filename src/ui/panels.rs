@@ -565,8 +565,12 @@ pub fn create_tray_menu() -> HWND {
     ctx.bg = c::BG;
     ctx.hide_on_deactivate = true;
     let (w, h) = (s(140), s(240));
+    // Never add WS_EX_LAYERED: a layered window without SetLayeredWindowAttributes /
+    // UpdateLayeredWindow has alpha = 0 across the whole window, so GDI-drawn content
+    // never becomes visible ("the QuickDim panel is transparent"). Rounded corners are
+    // handled by apply_round_region + DWM, so no layered window is needed.
     let h2 = ui::create_window(&cls, "ProperDim Menu", 0, 0, w, h,
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, ctx, false);
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST, ctx, false);
     h2
 }
 
