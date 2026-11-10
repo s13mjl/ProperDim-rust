@@ -90,8 +90,10 @@ fn main() {
     };
 
     let controller_ctx = ui::WindowCtx::new(WindowKind::Controller, "", false);
+    // 这个窗口永远不显示（只收托盘/热键/定时器消息），用 WS_EX_TOOLWINDOW 即可。
+    // 绝不能加 WS_EX_LAYERED：未设 LayeredWindowAttributes 的分层窗口会整窗透明。
     let controller = ui::create_window(&cls, "ProperDim Controller", 0, 0, 0, 0,
-        WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT | WS_EX_LAYERED, controller_ctx, false);
+        WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT, controller_ctx, false);
     if controller == NULL {
         unsafe {
             let t = wide("Startup Error: failed to create controller window");
@@ -151,6 +153,11 @@ fn main() {
 
     // 7. 按配置显示控制面板（对应 ShowOnStartup）
     if app::app().settings.show_on_startup { app::show_control_panel(); }
+
+    // 调试开关：直接弹出快速调光面板（托盘点击不方便自动化验证）
+    if args.iter().any(|a| a.eq_ignore_ascii_case("--quickdim")) {
+        ui::panels::show_tray_menu();
+    }
 
     // 8. 消息循环（对应 WPF Dispatcher）
     //

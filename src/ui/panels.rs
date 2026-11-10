@@ -565,8 +565,11 @@ pub fn create_tray_menu() -> HWND {
     ctx.bg = c::BG;
     ctx.hide_on_deactivate = true;
     let (w, h) = (s(140), s(240));
+    // 注意：不要加 WS_EX_LAYERED。分层窗口在未调用 SetLayeredWindowAttributes /
+    // UpdateLayeredWindow 时整窗 alpha=0，GDI 自绘内容不会显示 —— 表现为「面板透明看不见」。
+    // 圆角由 apply_round_region + DWM 圆角处理，不需要分层。
     let h2 = ui::create_window(&cls, "ProperDim 菜单", 0, 0, w, h,
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, ctx, false);
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST, ctx, false);
     h2
 }
 
